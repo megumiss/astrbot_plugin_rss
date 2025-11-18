@@ -174,8 +174,22 @@ class RssPlugin(Star):
         if text is None:
             self.logger.error(f"rss: 无法解析站点 {url} 的RSS信息")
             return []
-        root = etree.fromstring(text)
-        items = root.xpath("//item")
+        
+        try:
+            root = etree.fromstring(text)
+        except Exception as e:
+            self.logger.error(f"rss: XML解析失败 {url}: {str(e)}")
+            return []
+        
+        # 检测是RSS还是Atom
+        namespaces = root.nsmap
+        is_atom = any('atom' in str(v).lower() for v in namespaces.values() if v)
+        
+        # 根据格式选择item路径
+        if is_atom:
+            items = root.xpath("//atom:entry", namespaces=namespaces) or root.xpath("//entry")
+        else:
+            items = root.xpath("//item")
 
         cnt = 0
         rss_items = []
@@ -188,60 +202,160 @@ class RssPlugin(Star):
                     else "未知频道"
                 )
 
-                title = item.xpath("title")[0].text
+                # 提取标题
+                if is_atom:
+                    title_elem = item.xpath("atom:title", namespaces=namespaces) or item.xpath("title")
+                else:
+                    title_elem = item.xpath("title")
+                
+                title = title_elem[0].text if title_elem and title_elem[0].text else "无标题"
                 if len(title) > self.title_max_length:
                     title = title[: self.title_max_length] + "..."
 
-                link = item.xpath("link")[0].text
-                if not re.match(r"^https?://", link):
+                # 提取链接
+                if is_atom:
+                    link_elem = item.xpath("atom:link/@href", namespaces=namespaces) or item.xpath("link/@href")
+                    link = link_elem[0] if link_elem else ""
+                else:
+                    link_elem = item.xpath("link")
+                    link = link_elem[0].text if link_elem and link_elem[0].text else ""
+                
+                if link and not re.match(r"^https?://", link):
                     link = self.data_handler.get_root_url(url) + link
 
-                description = item.xpath("description")[0].text
-
-                pic_url_list = self.data_handler.strip_html_pic(description)
-                description = self.data_handler.strip_html(description)
-
-                if len(description) > self.description_max_length:
-                    description = (
-                        description[: self.description_max_length] + "..."
-                    )
-
-                if item.xpath("pubDate"):
-                    # 根据 pubDate 判断是否为新内容
-                    pub_date = item.xpath("pubDate")[0].text
-                    pub_date_parsed = time.strptime(
-                        pub_date.replace("GMT", "+0000"),
-                        "%a, %d %b %Y %H:%M:%S %z",
-                    )
-                    pub_date_timestamp = int(time.mktime(pub_date_parsed))
-                    if pub_date_timestamp > after_timestamp:
-                        rss_items.append(
-                            RSSItem(
-                                chan_title,
-                                title,
-                                link,
-                                description,
-                                pub_date,
-                                pub_date_timestamp,
-                                pic_url_list
-                            )
-                        )
-                        cnt += 1
-                        if num != -1 and cnt >= num:
-                            break
-                    else:
-                        break
+                # 提取描述/内容 - 优先使用完整内容
+                content = ""
+                description = ""
+                summary = ""
+                
+                if is_atom:
+                    # Atom格式
+                    content_elem = item.xpath("atom:content", namespaces=namespaces) or item.xpath("content")
+                    summary_elem = item.xpath("atom:summary", namespaces=namespaces) or item.xpath("summary")
+                    
+                    if content_elem and content_elem[0].text:
+                        content = content_elem[0].text
+                    if summary_elem and summary_elem[0].text:
+                        summary = summary_elem[0].text
+                    description = content or summary
                 else:
-                    # 根据 link 判断是否为新内容
-                    if link != after_link:
-                        rss_items.append(
-                            RSSItem(chan_title, title, link, description, "", 0, pic_url_list)
+                    # RSS格式
+                    desc_elem = item.xpath("description")
+                    # 尝试获取content:encoded(更完整的内容)
+                    content_elem = item.xpath("*[local-name()='encoded']") or item.xpath("content:encoded", namespaces={'content': 'http://purl.org/rss/1.0/modules/content/'})
+                    
+                    if content_elem and content_elem[0].text:
+                        content = content_elem[0].text
+                    if desc_elem and desc_elem[0].text:
+                        description = desc_elem[0].text
+
+                # 提取作者
+                author = ""
+                if is_atom:
+                    author_elem = item.xpath("atom:author/atom:name", namespaces=namespaces) or item.xpath("author/name")
+                    if author_elem and author_elem[0].text:
+                        author = author_elem[0].text
+                else:
+                    author_elem = item.xpath("author") or item.xpath("dc:creator", namespaces={'dc': 'http://purl.org/dc/elements/1.1/'})
+                    if author_elem and author_elem[0].text:
+                        author = author_elem[0].text
+                
+                # 提取分类
+                categories = []
+                if is_atom:
+                    cat_elems = item.xpath("atom:category/@term", namespaces=namespaces) or item.xpath("category/@term")
+                    categories = list(cat_elems)
+                else:
+                    cat_elems = item.xpath("category")
+                    categories = [cat.text for cat in cat_elems if cat.text]
+                
+                # 提取附件(enclosure)
+                enclosure_url = ""
+                enclosure_type = ""
+                enclosure_elem = item.xpath("enclosure")
+                if enclosure_elem:
+                    enclosure_url = enclosure_elem[0].get("url", "")
+                    enclosure_type = enclosure_elem[0].get("type", "")
+                
+                # 提取评论链接
+                comments_url = ""
+                comments_elem = item.xpath("comments")
+                if comments_elem and comments_elem[0].text:
+                    comments_url = comments_elem[0].text
+                
+                # 提取GUID
+                guid = ""
+                if is_atom:
+                    guid_elem = item.xpath("atom:id", namespaces=namespaces) or item.xpath("id")
+                    if guid_elem and guid_elem[0].text:
+                        guid = guid_elem[0].text
+                else:
+                    guid_elem = item.xpath("guid")
+                    if guid_elem and guid_elem[0].text:
+                        guid = guid_elem[0].text
+                
+                # 处理内容 - 使用完整内容或描述
+                full_content = content or description
+                pic_url_list = self.data_handler.strip_html_pic(full_content)
+                
+                # 清理HTML得到纯文本描述
+                clean_description = self.data_handler.strip_html(description or content)
+                clean_description = self.data_handler.smart_truncate(clean_description, self.description_max_length)
+                
+                # 保留完整内容
+                clean_content = self.data_handler.strip_html(content) if content else ""
+
+                # 提取日期
+                pub_date = ""
+                pub_date_timestamp = 0
+                
+                if is_atom:
+                    date_elem = item.xpath("atom:updated", namespaces=namespaces) or \
+                               item.xpath("atom:published", namespaces=namespaces) or \
+                               item.xpath("updated") or item.xpath("published")
+                    if date_elem and date_elem[0].text:
+                        pub_date = date_elem[0].text
+                else:
+                    date_elem = item.xpath("pubDate")
+                    if date_elem and date_elem[0].text:
+                        pub_date = date_elem[0].text
+                
+                # 解析日期
+                if pub_date:
+                    pub_date_timestamp = self._parse_date(pub_date)
+                
+                # 判断是否为新内容
+                is_new = False
+                if pub_date_timestamp > 0:
+                    is_new = pub_date_timestamp > after_timestamp
+                else:
+                    is_new = link != after_link
+                
+                if is_new:
+                    rss_items.append(
+                        RSSItem(
+                            chan_title=chan_title,
+                            title=title,
+                            link=link,
+                            description=clean_description,
+                            pubDate=pub_date,
+                            pubDate_timestamp=pub_date_timestamp,
+                            pic_urls=pic_url_list,
+                            author=author,
+                            categories=categories,
+                            content=clean_content,
+                            summary=summary,
+                            enclosure_url=enclosure_url,
+                            enclosure_type=enclosure_type,
+                            comments_url=comments_url,
+                            guid=guid
                         )
-                        cnt += 1
-                        if num != -1 and cnt >= num:
-                            break
-                    else:
+                    )
+                    cnt += 1
+                    if num != -1 and cnt >= num:
                         break
+                elif pub_date_timestamp > 0:  # 有日期但不是新内容,停止
+                    break
 
             except Exception as e:
                 self.logger.error(f"rss: 解析Rss条目 {url} 失败: {str(e)}")
@@ -249,6 +363,40 @@ class RssPlugin(Star):
 
         return rss_items
 
+    def _parse_date(self, date_str: str) -> int:
+        """解析各种日期格式为时间戳"""
+        if not date_str:
+            return 0
+        
+        # 常见日期格式
+        date_formats = [
+            "%a, %d %b %Y %H:%M:%S %z",      # RSS标准: Wed, 02 Oct 2002 13:00:00 GMT
+            "%a, %d %b %Y %H:%M:%S GMT",     # RSS GMT格式
+            "%Y-%m-%dT%H:%M:%S%z",           # ISO 8601: 2002-10-02T13:00:00+00:00
+            "%Y-%m-%dT%H:%M:%SZ",            # ISO 8601 UTC: 2002-10-02T13:00:00Z
+            "%Y-%m-%dT%H:%M:%S.%f%z",        # ISO 8601带毫秒
+            "%Y-%m-%dT%H:%M:%S.%fZ",         # ISO 8601 UTC带毫秒
+            "%Y-%m-%d %H:%M:%S",             # 简单格式
+            "%Y/%m/%d %H:%M:%S",             # 斜杠分隔
+        ]
+        
+        # 预处理
+        date_str = date_str.strip()
+        if "GMT" in date_str:
+            date_str = date_str.replace("GMT", "+0000")
+        
+        # 尝试各种格式
+        for fmt in date_formats:
+            try:
+                parsed = time.strptime(date_str, fmt)
+                return int(time.mktime(parsed))
+            except ValueError:
+                continue
+        
+        # 如果都失败,返回当前时间
+        self.logger.warning(f"无法解析日期格式: {date_str}")
+        return int(time.time())
+    
     def parse_rss_url(self, url: str) -> str:
         """解析RSS URL，确保以http或https开头"""
         if not re.match(r"^https?://", url):
@@ -318,20 +466,73 @@ class RssPlugin(Star):
     async def _get_chain_components(self, item: RSSItem):
         """组装消息链"""
         comps = []
-        comps.append(Comp.Plain(f"频道 {item.chan_title} 最新 Feed\n---\n标题: {item.title}\n---\n"))
-        if not self.is_hide_url:
-            comps.append(Comp.Plain(f"链接: {item.link}\n---\n"))
-        comps.append(Comp.Plain(item.description+"\n---\n"))
+        
+        # 标题和频道信息
+        header = f"📰 {item.chan_title}\n"
+        header += f"{'─' * 30}\n"
+        header += f"📌 {item.title}\n"
+        
+        # 添加作者和分类
+        meta_info = []
+        if item.author:
+            meta_info.append(f"👤 {item.author}")
+        if item.categories:
+            meta_info.append(f"🏷️ {', '.join(item.categories[:3])}")  # 最多显示3个分类
+        if item.pubDate:
+            # 格式化日期显示
+            if item.pubDate_timestamp > 0:
+                import datetime
+                dt = datetime.datetime.fromtimestamp(item.pubDate_timestamp)
+                meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
+        
+        if meta_info:
+            header += " | ".join(meta_info) + "\n"
+        
+        header += f"{'─' * 30}\n"
+        comps.append(Comp.Plain(header))
+        
+        # 内容 - 使用完整内容或描述
+        content_text = item.get_display_content(self.description_max_length)
+        if content_text:
+            comps.append(Comp.Plain(content_text + "\n"))
+        
+        # 链接
+        if not self.is_hide_url and item.link:
+            comps.append(Comp.Plain(f"\n🔗 {item.link}\n"))
+        
+        # 附件信息(音频/视频)
+        if item.enclosure_url:
+            enclosure_info = "\n📎 附件: "
+            if "audio" in item.enclosure_type:
+                enclosure_info += "🎵 音频 - "
+            elif "video" in item.enclosure_type:
+                enclosure_info += "🎬 视频 - "
+            else:
+                enclosure_info += "📄 文件 - "
+            enclosure_info += item.enclosure_url + "\n"
+            comps.append(Comp.Plain(enclosure_info))
+        
+        # 评论链接
+        if item.comments_url:
+            comps.append(Comp.Plain(f"💬 评论: {item.comments_url}\n"))
+        
+        # 图片
         if self.is_read_pic and item.pic_urls:
+            comps.append(Comp.Plain(f"\n📷 图片 ({len(item.pic_urls)}张):\n"))
             # 如果max_pic_item为-1则不限制图片数量
             temp_max_pic_item = len(item.pic_urls) if self.max_pic_item == -1 else self.max_pic_item
-            for pic_url in item.pic_urls[:temp_max_pic_item]:
+            for idx, pic_url in enumerate(item.pic_urls[:temp_max_pic_item], 1):
                 base64str = await self.pic_handler.modify_corner_pixel_to_base64(pic_url)
                 if base64str is None:
-                    comps.append(Comp.Plain("图片链接读取失败\n"))
+                    comps.append(Comp.Plain(f"  [{idx}] 图片加载失败: {pic_url[:50]}...\n"))
                     continue
                 else:
                     comps.append(Comp.Image.fromBase64(base64str))
+            
+            # 如果还有更多图片未显示
+            if len(item.pic_urls) > temp_max_pic_item:
+                comps.append(Comp.Plain(f"  ... 还有 {len(item.pic_urls) - temp_max_pic_item} 张图片未显示\n"))
+        
         return comps
 
 
