@@ -182,12 +182,11 @@ class RssPlugin(Star):
             return []
         
         # 检测是RSS还是Atom
-        namespaces = root.nsmap
-        is_atom = any('atom' in str(v).lower() for v in namespaces.values() if v)
+        is_atom = root.tag.endswith('feed') or 'atom' in root.tag.lower()
         
-        # 根据格式选择item路径
+        # 根据格式选择item路径 - 使用local-name()避免命名空间问题
         if is_atom:
-            items = root.xpath("//atom:entry", namespaces=namespaces) or root.xpath("//entry")
+            items = root.xpath("//*[local-name()='entry']")
         else:
             items = root.xpath("//item")
 
@@ -204,7 +203,7 @@ class RssPlugin(Star):
 
                 # 提取标题
                 if is_atom:
-                    title_elem = item.xpath("atom:title", namespaces=namespaces) or item.xpath("title")
+                    title_elem = item.xpath("*[local-name()='title']")
                 else:
                     title_elem = item.xpath("title")
                 
@@ -214,7 +213,7 @@ class RssPlugin(Star):
 
                 # 提取链接
                 if is_atom:
-                    link_elem = item.xpath("atom:link/@href", namespaces=namespaces) or item.xpath("link/@href")
+                    link_elem = item.xpath("*[local-name()='link']/@href")
                     link = link_elem[0] if link_elem else ""
                 else:
                     link_elem = item.xpath("link")
@@ -229,9 +228,9 @@ class RssPlugin(Star):
                 summary = ""
                 
                 if is_atom:
-                    # Atom格式
-                    content_elem = item.xpath("atom:content", namespaces=namespaces) or item.xpath("content")
-                    summary_elem = item.xpath("atom:summary", namespaces=namespaces) or item.xpath("summary")
+                    # Atom格式 - 使用local-name()
+                    content_elem = item.xpath("*[local-name()='content']")
+                    summary_elem = item.xpath("*[local-name()='summary']")
                     
                     if content_elem and content_elem[0].text:
                         content = content_elem[0].text
@@ -242,7 +241,7 @@ class RssPlugin(Star):
                     # RSS格式
                     desc_elem = item.xpath("description")
                     # 尝试获取content:encoded(更完整的内容)
-                    content_elem = item.xpath("*[local-name()='encoded']") or item.xpath("content:encoded", namespaces={'content': 'http://purl.org/rss/1.0/modules/content/'})
+                    content_elem = item.xpath("*[local-name()='encoded']")
                     
                     if content_elem and content_elem[0].text:
                         content = content_elem[0].text
@@ -252,18 +251,18 @@ class RssPlugin(Star):
                 # 提取作者
                 author = ""
                 if is_atom:
-                    author_elem = item.xpath("atom:author/atom:name", namespaces=namespaces) or item.xpath("author/name")
+                    author_elem = item.xpath("*[local-name()='author']/*[local-name()='name']")
                     if author_elem and author_elem[0].text:
                         author = author_elem[0].text
                 else:
-                    author_elem = item.xpath("author") or item.xpath("dc:creator", namespaces={'dc': 'http://purl.org/dc/elements/1.1/'})
+                    author_elem = item.xpath("author") or item.xpath("*[local-name()='creator']")
                     if author_elem and author_elem[0].text:
                         author = author_elem[0].text
                 
                 # 提取分类
                 categories = []
                 if is_atom:
-                    cat_elems = item.xpath("atom:category/@term", namespaces=namespaces) or item.xpath("category/@term")
+                    cat_elems = item.xpath("*[local-name()='category']/@term")
                     categories = list(cat_elems)
                 else:
                     cat_elems = item.xpath("category")
@@ -286,7 +285,7 @@ class RssPlugin(Star):
                 # 提取GUID
                 guid = ""
                 if is_atom:
-                    guid_elem = item.xpath("atom:id", namespaces=namespaces) or item.xpath("id")
+                    guid_elem = item.xpath("*[local-name()='id']")
                     if guid_elem and guid_elem[0].text:
                         guid = guid_elem[0].text
                 else:
@@ -310,9 +309,8 @@ class RssPlugin(Star):
                 pub_date_timestamp = 0
                 
                 if is_atom:
-                    date_elem = item.xpath("atom:updated", namespaces=namespaces) or \
-                               item.xpath("atom:published", namespaces=namespaces) or \
-                               item.xpath("updated") or item.xpath("published")
+                    date_elem = item.xpath("*[local-name()='updated']") or \
+                               item.xpath("*[local-name()='published']")
                     if date_elem and date_elem[0].text:
                         pub_date = date_elem[0].text
                 else:

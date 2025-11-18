@@ -40,16 +40,31 @@ class DataHandler:
         """解析RSS频道信息"""
         root = etree.fromstring(text)
         
+        # 检测是否为Atom feed
+        is_atom = root.tag.endswith('feed') or 'atom' in root.tag.lower()
+        
         # 安全获取title
-        title_elements = root.xpath("//channel/title")
-        if not title_elements:
-            title_elements = root.xpath("//title")
+        if is_atom:
+            # Atom格式 - 使用local-name()避免命名空间问题
+            title_elements = root.xpath("//*[local-name()='title']")
+        else:
+            # RSS格式
+            title_elements = root.xpath("//channel/title")
+            if not title_elements:
+                title_elements = root.xpath("//title")
+        
         title = title_elements[0].text if title_elements and title_elements[0].text else "未知频道"
         
-        # 安全获取description
-        desc_elements = root.xpath("//channel/description")
-        if not desc_elements:
-            desc_elements = root.xpath("//description")
+        # 安全获取description/subtitle
+        if is_atom:
+            # Atom格式使用subtitle
+            desc_elements = root.xpath("//*[local-name()='subtitle']")
+        else:
+            # RSS格式
+            desc_elements = root.xpath("//channel/description")
+            if not desc_elements:
+                desc_elements = root.xpath("//description")
+        
         description = desc_elements[0].text if desc_elements and desc_elements[0].text else "无描述"
         
         return title, description
