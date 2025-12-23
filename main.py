@@ -3,6 +3,7 @@ import asyncio
 import time
 import re
 import logging
+import os
 from lxml import etree
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -48,6 +49,15 @@ class RssPlugin(Star):
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
         self.scheduler = AsyncIOScheduler()
         self.scheduler.start()
+
+        # 定期清理临时文件的任务
+        self.scheduler.add_job(
+            self.pic_handler.cleanup_temp_files, 
+            "interval",
+            minutes=30,
+            id="rss_image_cleanup",
+            replace_existing=True
+        )
 
         self._fresh_asyncIOScheduler()
 
@@ -562,13 +572,15 @@ class RssPlugin(Star):
             temp_max_pic_item = len(item.pic_urls) if self.max_pic_item == -1 else self.max_pic_item
             
             for idx, pic_url in enumerate(item.pic_urls[:temp_max_pic_item], 1):
-                base64str = await self.pic_handler.modify_corner_pixel_to_base64(pic_url)
-                if base64str is None:
-                    # 图片加载失败的信息，作为单独的文本组件添加
-                    comps.append(Comp.Plain(f"\n[❌] 图{idx} 加载失败\n"))
-                    continue
+                # 获取本地路径
+                file_path = await self.pic_handler.get_image_file(pic_url)
+                
+                if file_path:
+                    # 使用 fromFileSystem 发送本地文件
+                    comps.append(Comp.Image.fromFileSystem(file_path))
                 else:
-                    comps.append(Comp.Image.fromBase64(base64str))
+                    # 图片加载失败的信息
+                    comps.append(Comp.Plain(f"\n[❌] 图{idx} 加载失败\n"))
             
             # 如果还有更多图片未显示
             if len(item.pic_urls) > temp_max_pic_item:
