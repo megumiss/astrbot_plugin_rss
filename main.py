@@ -21,7 +21,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.3",
+    "1.0.4",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -404,49 +404,49 @@ class RssPlugin(Star):
         return url
 
     def _fresh_asyncIOScheduler(self):
-            """刷新定时任务，使用固定ID防止任务堆积"""
-            self.logger.info("刷新定时任务")
+        """刷新定时任务，使用固定ID防止任务堆积"""
+        self.logger.info("刷新定时任务")
+        
+        # 1. 收集当前配置中所有应该存在的任务 ID
+        active_job_ids = set()
+        
+        for url, info in self.data_handler.data.items():
+            if url in ["rsshub_endpoints", "settings"]:
+                continue
             
-            # 1. 收集当前配置中所有应该存在的任务 ID
-            active_job_ids = set()
-            
-            for url, info in self.data_handler.data.items():
-                if url in ["rsshub_endpoints", "settings"]:
-                    continue
+            for user, sub_info in info["subscribers"].items():
+                # 构造唯一 ID：URL + User
+                job_id = f"{url}|{user}"
+                active_job_ids.add(job_id)
                 
-                for user, sub_info in info["subscribers"].items():
-                    # 构造唯一 ID：URL + User
-                    job_id = f"{url}|{user}"
-                    active_job_ids.add(job_id)
-                    
-                    try:
-                        # 添加或更新任务
-                        # id: 指定固定ID
-                        # replace_existing: 如果任务已存在，则更新触发参数
-                        self.scheduler.add_job(
-                            self.cron_task_callback,
-                            "cron",
-                            **self.parse_cron_expr(sub_info["cron_expr"]),
-                            args=[url, user],
-                            id=job_id,
-                            replace_existing=True
-                        )
-                    except Exception as e:
-                        self.logger.error(f"添加定时任务失败 {job_id}: {str(e)}")
+                try:
+                    # 添加或更新任务
+                    # id: 指定固定ID
+                    # replace_existing: 如果任务已存在，则更新触发参数
+                    self.scheduler.add_job(
+                        self.cron_task_callback,
+                        "cron",
+                        **self.parse_cron_expr(sub_info["cron_expr"]),
+                        args=[url, user],
+                        id=job_id,
+                        replace_existing=True
+                    )
+                except Exception as e:
+                    self.logger.error(f"添加定时任务失败 {job_id}: {str(e)}")
 
-            # 2. 清理已经不再配置中的废弃任务
-            # 获取调度器中当前所有的任务
-            current_jobs = self.scheduler.get_jobs()
-            for job in current_jobs:
-                # 如果调度器里的任务ID不在我们需要活跃的列表中，说明该订阅已被删除
-                if job.id not in active_job_ids:
-                    try:
-                        self.scheduler.remove_job(job.id)
-                        self.logger.info(f"清理废弃任务: {job.id}")
-                    except Exception as e:
-                        self.logger.error(f"清理废弃任务失败 {job.id}: {str(e)}")
+        # 2. 清理已经不再配置中的废弃任务
+        # 获取调度器中当前所有的任务
+        current_jobs = self.scheduler.get_jobs()
+        for job in current_jobs:
+            # 如果调度器里的任务ID不在我们需要活跃的列表中，说明该订阅已被删除
+            if job.id not in active_job_ids:
+                try:
+                    self.scheduler.remove_job(job.id)
+                    self.logger.info(f"清理废弃任务: {job.id}")
+                except Exception as e:
+                    self.logger.error(f"清理废弃任务失败 {job.id}: {str(e)}")
 
-            self.logger.info(f"定时任务刷新完成，当前运行任务数: {len(self.scheduler.get_jobs())}")
+        self.logger.info(f"定时任务刷新完成，当前运行任务数: {len(self.scheduler.get_jobs())}")
 
     async def _add_url(self, url: str, cron_expr: str, message: AstrMessageEvent):
         """内部方法:添加URL订阅的共用逻辑"""
@@ -491,72 +491,89 @@ class RssPlugin(Star):
     async def _get_chain_components(self, item: RSSItem):
         """组装消息链"""
         comps = []
+        # 收集所有的文本行
+        text_lines = []
         
         # 标题和频道信息
-        header = f"📰 {item.chan_title}\n"
-        header += f"{'─' * 30}\n"
-        header += f"📌 {item.title}\n"
+        text_lines.append(f"📰 {item.chan_title}")
+        text_lines.append("─" * 30)
+        text_lines.append(f"📌 {item.title}")
         
         # 添加作者和分类
         meta_info = []
         if item.author:
             meta_info.append(f"👤 {item.author}")
         if item.categories:
-            meta_info.append(f"🏷️ {', '.join(item.categories[:3])}")  # 最多显示3个分类
-        if item.pubDate:
+              # 最多显示3个分类
+            meta_info.append(f"🏷️ {', '.join(item.categories[:3])}")
+        if item.pubDate and item.pubDate_timestamp > 0:
             # 格式化日期显示
-            if item.pubDate_timestamp > 0:
-                import datetime
-                dt = datetime.datetime.fromtimestamp(item.pubDate_timestamp)
-                meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
+            import datetime
+            dt = datetime.datetime.fromtimestamp(item.pubDate_timestamp)
+            meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
         
         if meta_info:
-            header += " | ".join(meta_info) + "\n"
+            text_lines.append(" | ".join(meta_info))
         
-        header += f"{'─' * 30}\n"
-        comps.append(Comp.Plain(header))
+        text_lines.append("─" * 30)
         
         # 内容 - 使用完整内容或描述
         content_text = item.get_display_content(self.description_max_length)
         if content_text:
-            comps.append(Comp.Plain(content_text + "\n"))
+            # 确保内容本身前后不带多余空行
+            text_lines.append(content_text.strip())
         
         # 链接
         if not self.is_hide_url and item.link:
-            comps.append(Comp.Plain(f"\n🔗 {item.link}\n"))
+            # 添加一个空行做分隔
+            text_lines.append("") 
+            text_lines.append(f"🔗 {item.link}")
         
         # 附件信息(音频/视频)
         if item.enclosure_url:
-            enclosure_info = "\n📎 附件: "
+            text_lines.append("") # 空行分隔
+            enclosure_info = "📎 附件: "
             if "audio" in item.enclosure_type:
                 enclosure_info += "🎵 音频 - "
             elif "video" in item.enclosure_type:
                 enclosure_info += "🎬 视频 - "
             else:
                 enclosure_info += "📄 文件 - "
-            enclosure_info += item.enclosure_url + "\n"
-            comps.append(Comp.Plain(enclosure_info))
-        
+            enclosure_info += item.enclosure_url
+            text_lines.append(enclosure_info)
+            
         # 评论链接
         if item.comments_url:
-            comps.append(Comp.Plain(f"💬 评论: {item.comments_url}\n"))
-        
-        # 图片
-        if self.is_read_pic and item.pic_urls:
-            comps.append(Comp.Plain(f"\n📷 图片 ({len(item.pic_urls)}张):\n"))
+            text_lines.append(f"💬 评论: {item.comments_url}")
+
+        # 图片标题
+        has_images = self.is_read_pic and item.pic_urls
+        if has_images:
+            text_lines.append("") # 空行分隔
+            text_lines.append(f"📷 图片 ({len(item.pic_urls)}张):")
+
+        # 生成文本
+        final_text = "\n".join(text_lines)
+        comps.append(Comp.Plain(final_text))
+
+        # 处理图片组件
+        if has_images:
             # 如果max_pic_item为-1则不限制图片数量
             temp_max_pic_item = len(item.pic_urls) if self.max_pic_item == -1 else self.max_pic_item
+            
             for idx, pic_url in enumerate(item.pic_urls[:temp_max_pic_item], 1):
                 base64str = await self.pic_handler.modify_corner_pixel_to_base64(pic_url)
                 if base64str is None:
-                    comps.append(Comp.Plain(f"  [{idx}] 图片加载失败: {pic_url[:50]}...\n"))
+                    # 图片加载失败的信息，作为单独的文本组件添加
+                    comps.append(Comp.Plain(f"\n[❌] 图{idx} 加载失败\n"))
                     continue
                 else:
                     comps.append(Comp.Image.fromBase64(base64str))
             
             # 如果还有更多图片未显示
             if len(item.pic_urls) > temp_max_pic_item:
-                comps.append(Comp.Plain(f"  ... 还有 {len(item.pic_urls) - temp_max_pic_item} 张图片未显示\n"))
+                count = len(item.pic_urls) - temp_max_pic_item
+                comps.append(Comp.Plain(f"\n... 还有 {count} 张图片未显示"))
         
         return comps
 
