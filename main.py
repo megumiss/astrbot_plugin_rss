@@ -19,10 +19,10 @@ from typing import List
 
 @register(
     "astrbot_plugin_rss",
-    "Soulter",
+    "megumiss",
     "RSS订阅插件",
-    "1.1.0",
-    "https://github.com/Soulter/astrbot_plugin_rss",
+    "1.0.3",
+    "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -404,22 +404,49 @@ class RssPlugin(Star):
         return url
 
     def _fresh_asyncIOScheduler(self):
-        """刷新定时任务"""
-        # 删除所有定时任务
-        self.logger.info("刷新定时任务")
-        self.scheduler.remove_all_jobs()
+            """刷新定时任务，使用固定ID防止任务堆积"""
+            self.logger.info("刷新定时任务")
+            
+            # 1. 收集当前配置中所有应该存在的任务 ID
+            active_job_ids = set()
+            
+            for url, info in self.data_handler.data.items():
+                if url in ["rsshub_endpoints", "settings"]:
+                    continue
+                
+                for user, sub_info in info["subscribers"].items():
+                    # 构造唯一 ID：URL + User
+                    job_id = f"{url}|{user}"
+                    active_job_ids.add(job_id)
+                    
+                    try:
+                        # 添加或更新任务
+                        # id: 指定固定ID
+                        # replace_existing: 如果任务已存在，则更新触发参数
+                        self.scheduler.add_job(
+                            self.cron_task_callback,
+                            "cron",
+                            **self.parse_cron_expr(sub_info["cron_expr"]),
+                            args=[url, user],
+                            id=job_id,
+                            replace_existing=True
+                        )
+                    except Exception as e:
+                        self.logger.error(f"添加定时任务失败 {job_id}: {str(e)}")
 
-        # 为每个订阅添加定时任务
-        for url, info in self.data_handler.data.items():
-            if url == "rsshub_endpoints" or url == "settings":
-                continue
-            for user, sub_info in info["subscribers"].items():
-                self.scheduler.add_job(
-                    self.cron_task_callback,
-                    "cron",
-                    **self.parse_cron_expr(sub_info["cron_expr"]),
-                    args=[url, user],
-                )
+            # 2. 清理已经不再配置中的废弃任务
+            # 获取调度器中当前所有的任务
+            current_jobs = self.scheduler.get_jobs()
+            for job in current_jobs:
+                # 如果调度器里的任务ID不在我们需要活跃的列表中，说明该订阅已被删除
+                if job.id not in active_job_ids:
+                    try:
+                        self.scheduler.remove_job(job.id)
+                        self.logger.info(f"清理废弃任务: {job.id}")
+                    except Exception as e:
+                        self.logger.error(f"清理废弃任务失败 {job.id}: {str(e)}")
+
+            self.logger.info(f"定时任务刷新完成，当前运行任务数: {len(self.scheduler.get_jobs())}")
 
     async def _add_url(self, url: str, cron_expr: str, message: AstrMessageEvent):
         """内部方法:添加URL订阅的共用逻辑"""
