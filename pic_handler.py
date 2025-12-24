@@ -103,6 +103,28 @@ class RssImageHandler:
                     pass
             return None
 
+    def rotate_image_180(self, file_path: str) -> bool:
+        """
+        读取指定路径的图片，旋转180度并覆盖保存
+        用于在发送失败（风控）时尝试绕过
+        """
+        try:
+            if not os.path.exists(file_path):
+                return False
+            
+            # 打开图片
+            img = Image.open(file_path)
+            # 旋转 180 度
+            img = img.transpose(Image.ROTATE_180)
+            # 覆盖保存
+            img.save(file_path, quality=85)
+            
+            self.logger.warning(f"[RSS] 以此尝试绕过风控: 已将图片旋转180度 -> {os.path.basename(file_path)}")
+            return True
+        except Exception as e:
+            self.logger.error(f"[RSS] 旋转图片失败: {e}")
+            return False
+
     def cleanup_temp_files(self, max_age_seconds=3600):
         """
         清理过期的临时文件
