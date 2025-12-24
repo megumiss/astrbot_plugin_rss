@@ -21,7 +21,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.4",
+    "1.0.5",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -60,6 +60,16 @@ class RssPlugin(Star):
             "month": fields[3],
             "day_of_week": fields[4],
         }
+
+    def terminate(self):
+        """插件卸载/重载时的清理工作"""
+        self.logger.info("RSS插件正在卸载，准备停止调度器...")
+        try:
+            if hasattr(self, 'scheduler') and self.scheduler.running:
+                self.scheduler.shutdown()
+                self.logger.info("RSS插件调度器已停止。")
+        except Exception as e:
+            self.logger.error(f"停止RSS插件调度器时发生错误: {e}")
 
     async def parse_channel_info(self, url):
         headers = {
