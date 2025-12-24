@@ -24,7 +24,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.6",
+    "1.0.8",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -479,9 +479,10 @@ class RssPlugin(Star):
         """刷新定时任务，使用固定ID防止任务堆积"""
         self.logger.info("刷新定时任务")
         
-        # 1. 收集当前配置中所有应该存在的任务 ID
-        active_job_ids = set()
+        # 1. 初始化白名单，默认包含系统级清理任务ID
+        active_job_ids = {"rss_image_cleanup"}
         
+        # 2. 收集所有活跃的订阅任务ID
         for url, info in self.data_handler.data.items():
             if url in ["rsshub_endpoints", "settings"]:
                 continue
@@ -506,7 +507,7 @@ class RssPlugin(Star):
                 except Exception as e:
                     self.logger.error(f"添加定时任务失败 {job_id}: {str(e)}")
 
-        # 2. 清理已经不再配置中的废弃任务
+        # 3. 清理已经不再配置中的废弃任务
         # 获取调度器中当前所有的任务
         current_jobs = self.scheduler.get_jobs()
         for job in current_jobs:
