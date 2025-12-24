@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from lxml import etree
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
+# from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+#     AiocqhttpMessageEvent,
+# )
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
@@ -188,10 +190,10 @@ class RssPlugin(Star):
         max_ts = last_update
 
         # 分解MessageSesion
-        platform_name, message_type, session_id = user.split(":")
+        # platform_name, message_type, session_id = user.split(":")
 
-        # 分平台处理消息
-        if platform_name == "aiocqhttp" and self.is_compose:
+        # TODO 分平台处理消息
+        if self.is_compose:
             nodes = []
             for item in rss_items:
                 comps = await self._get_chain_components(item)
@@ -929,7 +931,8 @@ class RssPlugin(Star):
         target_message_chain = None
 
         # 区分平台构造消息链
-        if(platform_name == "aiocqhttp" and self.is_compose):
+        # TODO isinstance(event, AiocqhttpMessageEvent)
+        if self.is_compose:
             node = Comp.Node(
                     uin=0,
                     name="Astrbot",
