@@ -71,7 +71,7 @@ class RssPlugin(Star):
             "day_of_week": fields[4],
         }
 
-    def terminate(self):
+    async def terminate(self):
         """插件卸载/重载时的清理工作"""
         self.logger.info("RSS插件正在卸载，准备停止调度器...")
         try:
