@@ -39,6 +39,12 @@
         "obvious_hint": true,
         "default": false
     },
+        "time_zone": {
+        "type": "string",
+        "description": "时间显示时区（IANA 标准名称）",
+        "hint": "例如: Asia/Shanghai, UTC",
+        "default": "Asia/Shanghai"
+    },
     "pic_config": {
         "description": "图片相关配置",
         "type": "object",

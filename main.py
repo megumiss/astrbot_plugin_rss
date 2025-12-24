@@ -4,6 +4,8 @@ import time
 import re
 import logging
 import os
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from lxml import etree
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -24,7 +26,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.8",
+    "1.1.0",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -50,7 +52,9 @@ class RssPlugin(Star):
         self.max_pic_item = config.get("pic_config").get("max_pic_item")
         self.cleanup_cron = config.get("pic_config").get("cleanup_cron")
         self.cleanup_retention = config.get("pic_config").get("cleanup_retention")
-
+        # 时区配置
+        self.time_zone = config.get("time_zone", "Asia/Shanghai")
+        
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
         self.scheduler = AsyncIOScheduler()
         self.scheduler.start()
@@ -180,6 +184,7 @@ class RssPlugin(Star):
             after_timestamp=last_update,
             after_link=latest_link,
         )
+        # 初始化 max_ts 为当前的 last_update
         max_ts = last_update
 
         # 分解MessageSesion
@@ -196,10 +201,9 @@ class RssPlugin(Star):
                     content=comps
                 )
                 nodes.append(node)
-                self.data_handler.data[url]["subscribers"][user]["last_update"] = int(
-                    time.time()
-                )
-                max_ts = max(max_ts, item.pubDate_timestamp)
+                # 消息里最新的那个 pubDate
+                if item.pubDate_timestamp > max_ts:
+                    max_ts = item.pubDate_timestamp
 
             # 合并消息发送
             if len(nodes) > 0:
@@ -220,17 +224,18 @@ class RssPlugin(Star):
                 # 调用统一发送方法
                 await self._safe_send_message(user, msc)
 
-                self.data_handler.data[url]["subscribers"][user]["last_update"] = int(
-                    time.time()
-                )
-                max_ts = max(max_ts, item.pubDate_timestamp)
+                # 只记录 item 的时间戳，不使用系统时间
+                if item.pubDate_timestamp > max_ts:
+                    max_ts = item.pubDate_timestamp
 
         # 更新最后更新时间
         if rss_items:
+            # 只有当确实处理了消息，才更新数据库
             self.data_handler.data[url]["subscribers"][user]["last_update"] = max_ts
+            # 更新最新链接作为双重校验
             self.data_handler.data[url]["subscribers"][user]["latest_link"] = rss_items[0].link
             self.data_handler.save_data()
-            self.logger.info(f"RSS 定时任务 {url} 推送成功 - {user}")
+            self.logger.info(f"RSS 定时任务 {url} 推送成功 - {user}，更新时间至: {max_ts}")
         else:
             self.logger.info(f"RSS 定时任务 {url} 无消息更新 - {user}")
 
@@ -397,8 +402,10 @@ class RssPlugin(Star):
                 # 判断是否为新内容
                 is_new = False
                 if pub_date_timestamp > 0:
+                    # 只有当文章的发布时间严格晚于上次记录的时间时，才算新消息
                     is_new = pub_date_timestamp > after_timestamp
                 else:
+                    # 如果没有时间戳，退化为判断链接
                     is_new = link != after_link
                 
                 if is_new:
@@ -424,7 +431,8 @@ class RssPlugin(Star):
                     cnt += 1
                     if num != -1 and cnt >= num:
                         break
-                elif pub_date_timestamp > 0:  # 有日期但不是新内容,停止
+                elif pub_date_timestamp > 0:
+                    # 如果当前条目的时间戳小于等于上次更新时间，直接停止
                     break
 
             except Exception as e:
@@ -454,18 +462,23 @@ class RssPlugin(Star):
         date_str = date_str.strip()
         if "GMT" in date_str:
             date_str = date_str.replace("GMT", "+0000")
-        
-        # 尝试各种格式
+            
+        current_ts = int(time.time())
         for fmt in date_formats:
             try:
-                parsed = time.strptime(date_str, fmt)
-                return int(time.mktime(parsed))
+                dt = datetime.strptime(date_str, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = int(dt.timestamp())
+                
+                # 未来时间防护：超过1小时的未来时间视为异常，修正为当前时间
+                if ts > current_ts + 3600:
+                     return current_ts
+                return ts
             except ValueError:
                 continue
         
-        # 如果都失败,返回当前时间
-        self.logger.warning(f"无法解析日期格式: {date_str}")
-        return int(time.time())
+        return current_ts
     
     def parse_rss_url(self, url: str) -> str:
         """解析RSS URL，确保以http或https开头"""
@@ -476,7 +489,7 @@ class RssPlugin(Star):
         return url
 
     def _fresh_asyncIOScheduler(self):
-        """刷新定时任务，使用固定ID防止任务堆积"""
+        """刷新定时任务"""
         self.logger.info("刷新定时任务")
         
         # 1. 初始化白名单，默认包含系统级清理任务ID
@@ -538,7 +551,7 @@ class RssPlugin(Star):
                 replace_existing=True
             )
         except Exception as e:
-            self.logger.error(f"[RSS] 注册图片清理任务失败 (请检查 cleanup_cron 格式): {e}")
+            self.logger.error(f"[RSS] 注册图片清理任务失败: {e}")
             retention_seconds = self.cleanup_retention * 60
             self.scheduler.add_job(
                 self.pic_handler.cleanup_temp_files,
@@ -609,9 +622,14 @@ class RssPlugin(Star):
             meta_info.append(f"🏷️ {', '.join(item.categories[:3])}")
         if item.pubDate and item.pubDate_timestamp > 0:
             # 格式化日期显示
-            import datetime
-            dt = datetime.datetime.fromtimestamp(item.pubDate_timestamp)
-            meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
+            try:
+                target_tz = ZoneInfo(self.time_zone)
+                dt = datetime.fromtimestamp(item.pubDate_timestamp, target_tz)
+                meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
+            except Exception as e:
+                self.logger.warning(f"[RSS] 时间格式化失败: {e}")
+                dt = datetime.fromtimestamp(item.pubDate_timestamp)
+                meta_info.append(f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}")
         
         if meta_info:
             text_lines.append(" | ".join(meta_info))
