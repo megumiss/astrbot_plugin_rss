@@ -3,13 +3,16 @@ import asyncio
 import time
 import re
 import logging
+import os
 from lxml import etree
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult,MessageChain
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 import astrbot.api.message_components as Comp
+
+from aiocqhttp.exceptions import ActionFailed
 
 from .data_handler import DataHandler
 from .pic_handler import RssImageHandler
@@ -21,7 +24,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.5",
+    "1.0.8",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -40,15 +43,20 @@ class RssPlugin(Star):
         self.max_items_per_poll = config.get("max_items_per_poll")
         self.t2i = config.get("t2i")
         self.is_hide_url = config.get("is_hide_url")
-        self.is_read_pic= config.get("pic_config").get("is_read_pic")
-        self.is_adjust_pic= config.get("pic_config").get("is_adjust_pic")
-        self.max_pic_item = config.get("pic_config").get("max_pic_item")
         self.is_compose = config.get("compose")
+        # 图片配置
+        self.is_read_pic = config.get("pic_config").get("is_read_pic")
+        self.is_adjust_pic = config.get("pic_config").get("is_adjust_pic")
+        self.max_pic_item = config.get("pic_config").get("max_pic_item")
+        self.cleanup_cron = config.get("pic_config").get("cleanup_cron")
+        self.cleanup_retention = config.get("pic_config").get("cleanup_retention")
 
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
         self.scheduler = AsyncIOScheduler()
         self.scheduler.start()
 
+        # 清理任务
+        self._add_cleanup_job()
         self._fresh_asyncIOScheduler()
 
     def parse_cron_expr(self, cron_expr: str):
@@ -73,16 +81,16 @@ class RssPlugin(Star):
 
     async def parse_channel_info(self, url):
         headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         connector = aiohttp.TCPConnector(ssl=False)
         timeout = aiohttp.ClientTimeout(total=30, connect=10)
         try:
             async with aiohttp.ClientSession(trust_env=True,
-                                        connector=connector,
-                                        timeout=timeout,
-                                        headers=headers
-                                        ) as session:
+                                             connector=connector,
+                                             timeout=timeout,
+                                             headers=headers
+                                             ) as session:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         self.logger.error(f"rss: 无法正常打开站点 {url}")
@@ -98,6 +106,60 @@ class RssPlugin(Star):
         except Exception as e:
             self.logger.error(f"rss: 请求站点 {url} 发生未知错误: {str(e)}")
             return None
+
+    async def _safe_send_message(self, user: str, message_chain: MessageChain):
+        """
+        统一发送消息方法，包含风控重试逻辑
+        """
+        
+        # 辅助函数：旋转单个组件（如果它是图片）
+        def _try_rotate_component(component) -> bool:
+            if isinstance(component, Comp.Image) and component.file:
+                file_path = component.file
+                if file_path.startswith("file://"):
+                    file_path = file_path.replace("file://", "")
+                return self.pic_handler.rotate_image_180(file_path)
+            return False
+
+        try:
+            await self.context.send_message(user, message_chain)
+        except ActionFailed as e:
+            # 捕获 NTQQ 的 Timeout (风控) 错误
+            if e.retcode == 1200:
+                self.logger.warning(f"[RSS] 发送失败(Retcode 1200/Timeout)，疑似风控，尝试旋转图片重试...")
+                
+                has_rotated = False
+                # 遍历消息链，找到所有图片组件
+                for component in message_chain.chain:
+                    # 1. 直接是图片
+                    if _try_rotate_component(component):
+                        has_rotated = True
+                    
+                    # 2. 是Node（合并转发），需要遍历内容
+                    elif isinstance(component, Comp.Node):
+                        node_content = getattr(component, "content", [])
+                        # content可能是列表或MessageChain，这里假设是列表
+                        if isinstance(node_content, list):
+                            for sub_comp in node_content:
+                                if _try_rotate_component(sub_comp):
+                                    has_rotated = True
+                
+                if has_rotated:
+                    try:
+                        # 稍微等待一下再重试
+                        await asyncio.sleep(1)
+                        self.logger.info("[RSS] 重试发送旋转后的消息...")
+                        # 添加简短文字提示
+                        message_chain.chain.append(Comp.Plain("\n图片已被旋转"))
+                        await self.context.send_message(user, message_chain)
+                        return # 重试成功，退出
+                    except Exception as retry_e:
+                        self.logger.error(f"[RSS] 重试发送依然失败: {retry_e}")
+            
+            # 如果不是 1200 或者重试也挂了，打印错误但不阻断流程
+            self.logger.error(f"[RSS] 消息发送最终失败: {e}")
+        except Exception as e:
+            self.logger.error(f"[RSS] 发送遇到未知错误: {e}")
 
     async def cron_task_callback(self, url: str, user: str):
         """定时任务回调"""
@@ -121,7 +183,7 @@ class RssPlugin(Star):
         max_ts = last_update
 
         # 分解MessageSesion
-        platform_name,message_type,session_id = user.split(":")
+        platform_name, message_type, session_id = user.split(":")
 
         # 分平台处理消息
         if platform_name == "aiocqhttp" and self.is_compose:
@@ -129,10 +191,10 @@ class RssPlugin(Star):
             for item in rss_items:
                 comps = await self._get_chain_components(item)
                 node = Comp.Node(
-                            uin=0,
-                            name="Astrbot",
-                            content=comps
-                        )
+                    uin=0,
+                    name="Astrbot",
+                    content=comps
+                )
                 nodes.append(node)
                 self.data_handler.data[url]["subscribers"][user]["last_update"] = int(
                     time.time()
@@ -143,18 +205,21 @@ class RssPlugin(Star):
             if len(nodes) > 0:
                 msc = MessageChain(
                     chain=nodes,
-                    use_t2i_= self.t2i
+                    use_t2i_=self.t2i
                 )
-                await self.context.send_message(user, msc)
+                # 调用统一发送方法
+                await self._safe_send_message(user, msc)
         else:
             # 每个消息单独发送
             for item in rss_items:
                 comps = await self._get_chain_components(item)
                 msc = MessageChain(
-                chain=comps,
-                use_t2i_= self.t2i
-            )
-                await self.context.send_message(user, msc)
+                    chain=comps,
+                    use_t2i_=self.t2i
+                )
+                # 调用统一发送方法
+                await self._safe_send_message(user, msc)
+
                 self.data_handler.data[url]["subscribers"][user]["last_update"] = int(
                     time.time()
                 )
@@ -163,14 +228,11 @@ class RssPlugin(Star):
         # 更新最后更新时间
         if rss_items:
             self.data_handler.data[url]["subscribers"][user]["last_update"] = max_ts
-            self.data_handler.data[url]["subscribers"][user]["latest_link"] = rss_items[
-                0
-            ].link
+            self.data_handler.data[url]["subscribers"][user]["latest_link"] = rss_items[0].link
             self.data_handler.save_data()
             self.logger.info(f"RSS 定时任务 {url} 推送成功 - {user}")
         else:
             self.logger.info(f"RSS 定时任务 {url} 无消息更新 - {user}")
-
 
     async def poll_rss(
         self,
@@ -417,9 +479,10 @@ class RssPlugin(Star):
         """刷新定时任务，使用固定ID防止任务堆积"""
         self.logger.info("刷新定时任务")
         
-        # 1. 收集当前配置中所有应该存在的任务 ID
-        active_job_ids = set()
+        # 1. 初始化白名单，默认包含系统级清理任务ID
+        active_job_ids = {"rss_image_cleanup"}
         
+        # 2. 收集所有活跃的订阅任务ID
         for url, info in self.data_handler.data.items():
             if url in ["rsshub_endpoints", "settings"]:
                 continue
@@ -444,7 +507,7 @@ class RssPlugin(Star):
                 except Exception as e:
                     self.logger.error(f"添加定时任务失败 {job_id}: {str(e)}")
 
-        # 2. 清理已经不再配置中的废弃任务
+        # 3. 清理已经不再配置中的废弃任务
         # 获取调度器中当前所有的任务
         current_jobs = self.scheduler.get_jobs()
         for job in current_jobs:
@@ -457,6 +520,34 @@ class RssPlugin(Star):
                     self.logger.error(f"清理废弃任务失败 {job.id}: {str(e)}")
 
         self.logger.info(f"定时任务刷新完成，当前运行任务数: {len(self.scheduler.get_jobs())}")
+
+    def _add_cleanup_job(self):
+        """添加清理临时文件的定时任务"""
+        try:
+            # 解析 Cron 表达式
+            cron_args = self.parse_cron_expr(self.cleanup_cron)
+            retention_seconds = self.cleanup_retention * 60
+            self.logger.info(f"[RSS] 注册图片清理任务: Cron[{self.cleanup_cron}] 保留时长[{self.cleanup_retention}分钟]")
+            
+            self.scheduler.add_job(
+                self.pic_handler.cleanup_temp_files,
+                "cron",
+                **cron_args,
+                args=[retention_seconds],
+                id="rss_image_cleanup",
+                replace_existing=True
+            )
+        except Exception as e:
+            self.logger.error(f"[RSS] 注册图片清理任务失败 (请检查 cleanup_cron 格式): {e}")
+            retention_seconds = self.cleanup_retention * 60
+            self.scheduler.add_job(
+                self.pic_handler.cleanup_temp_files,
+                "interval",
+                minutes=30,
+                args=[retention_seconds],
+                id="rss_image_cleanup",
+                replace_existing=True
+            )
 
     async def _add_url(self, url: str, cron_expr: str, message: AstrMessageEvent):
         """内部方法:添加URL订阅的共用逻辑"""
@@ -572,13 +663,15 @@ class RssPlugin(Star):
             temp_max_pic_item = len(item.pic_urls) if self.max_pic_item == -1 else self.max_pic_item
             
             for idx, pic_url in enumerate(item.pic_urls[:temp_max_pic_item], 1):
-                base64str = await self.pic_handler.modify_corner_pixel_to_base64(pic_url)
-                if base64str is None:
-                    # 图片加载失败的信息，作为单独的文本组件添加
-                    comps.append(Comp.Plain(f"\n[❌] 图{idx} 加载失败\n"))
-                    continue
+                # 获取本地路径
+                file_path = await self.pic_handler.get_image_file(pic_url)
+                
+                if file_path:
+                    # 使用 fromFileSystem 发送本地文件
+                    comps.append(Comp.Image.fromFileSystem(file_path))
                 else:
-                    comps.append(Comp.Image.fromBase64(base64str))
+                    # 图片加载失败的信息
+                    comps.append(Comp.Plain(f"\n[❌] 图{idx} 加载失败\n"))
             
             # 如果还有更多图片未显示
             if len(item.pic_urls) > temp_max_pic_item:
@@ -811,16 +904,22 @@ class RssPlugin(Star):
             return
         item = rss_items[0]
         # 分解MessageSesion
-        platform_name,message_type,session_id = event.unified_msg_origin.split(":")
+        platform_name, message_type, session_id = event.unified_msg_origin.split(":")
         # 构造返回消息链
         comps = await self._get_chain_components(item)
-        # 区分平台
+        
+        target_message_chain = None
+
+        # 区分平台构造消息链
         if(platform_name == "aiocqhttp" and self.is_compose):
             node = Comp.Node(
                     uin=0,
                     name="Astrbot",
                     content=comps
                 )
-            yield event.chain_result([node]).use_t2i(self.t2i)
+            target_message_chain = MessageChain(chain=[node], use_t2i_=self.t2i)
         else:
-            yield event.chain_result(comps).use_t2i(self.t2i)
+            target_message_chain = MessageChain(chain=comps, use_t2i_=self.t2i)
+        
+        # 使用统一的发送方法
+        await self._safe_send_message(event.unified_msg_origin, target_message_chain)
