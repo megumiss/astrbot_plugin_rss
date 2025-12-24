@@ -22,7 +22,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.0.5",
+    "1.0.6",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -41,24 +41,20 @@ class RssPlugin(Star):
         self.max_items_per_poll = config.get("max_items_per_poll")
         self.t2i = config.get("t2i")
         self.is_hide_url = config.get("is_hide_url")
+        self.is_compose = config.get("compose")
+        # 图片配置
         self.is_read_pic= config.get("pic_config").get("is_read_pic")
         self.is_adjust_pic= config.get("pic_config").get("is_adjust_pic")
         self.max_pic_item = config.get("pic_config").get("max_pic_item")
-        self.is_compose = config.get("compose")
+        self.cleanup_cron = config.get("pic_config").get("cleanup_cron")
+        self.cleanup_retention = config.get("pic_config").get("cleanup_retention")
 
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
         self.scheduler = AsyncIOScheduler()
         self.scheduler.start()
 
-        # 定期清理临时文件的任务
-        self.scheduler.add_job(
-            self.pic_handler.cleanup_temp_files, 
-            "interval",
-            minutes=30,
-            id="rss_image_cleanup",
-            replace_existing=True
-        )
-
+        # 清理任务
+        self._add_cleanup_job()
         self._fresh_asyncIOScheduler()
 
     def parse_cron_expr(self, cron_expr: str):
@@ -71,7 +67,7 @@ class RssPlugin(Star):
             "day_of_week": fields[4],
         }
 
-    async def terminate(self):
+    def terminate(self):
         """插件卸载/重载时的清理工作"""
         self.logger.info("RSS插件正在卸载，准备停止调度器...")
         try:
@@ -467,6 +463,34 @@ class RssPlugin(Star):
                     self.logger.error(f"清理废弃任务失败 {job.id}: {str(e)}")
 
         self.logger.info(f"定时任务刷新完成，当前运行任务数: {len(self.scheduler.get_jobs())}")
+
+    def _add_cleanup_job(self):
+        """添加清理临时文件的定时任务"""
+        try:
+            # 解析 Cron 表达式
+            cron_args = self.parse_cron_expr(self.cleanup_cron)
+            retention_seconds = self.cleanup_retention * 60
+            self.logger.info(f"[RSS] 注册图片清理任务: Cron[{self.cleanup_cron}] 保留时长[{self.cleanup_retention}分钟]")
+            
+            self.scheduler.add_job(
+                self.pic_handler.cleanup_temp_files,
+                "cron",
+                **cron_args,
+                args=[retention_seconds],
+                id="rss_image_cleanup",
+                replace_existing=True
+            )
+        except Exception as e:
+            self.logger.error(f"[RSS] 注册图片清理任务失败 (请检查 cleanup_cron 格式): {e}")
+            retention_seconds = self.cleanup_retention * 60
+            self.scheduler.add_job(
+                self.pic_handler.cleanup_temp_files,
+                "interval",
+                minutes=30,
+                args=[retention_seconds],
+                id="rss_image_cleanup",
+                replace_existing=True
+            )
 
     async def _add_url(self, url: str, cron_expr: str, message: AstrMessageEvent):
         """内部方法:添加URL订阅的共用逻辑"""

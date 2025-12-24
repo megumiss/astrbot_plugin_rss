@@ -61,6 +61,18 @@
                 "type": "int",
                 "hint": "每次转换图片的最大条目数。 -1 表示不限制。",
                 "default": 3
+            },
+            "cleanup_cron": {
+                "description": "缓存图片清理周期",
+                "type": "string",
+                "hint": "Cron 表达式 (分 时 日 月 周)，例如 '0 4 * * *' 表示每天凌晨4点清理，'*/30 * * * *' 表示每30分钟清理。",
+                "default": "0/30 * * * *"
+            },
+            "cleanup_retention": {
+                "description": "缓存图片保留时间（分钟）",
+                "type": "int",
+                "hint": "单位：分钟。超过该时间的临时文件将被删除。建议设置 60 以上以防止图片发送失败。",
+                "default": 60
             }
         }
     }
