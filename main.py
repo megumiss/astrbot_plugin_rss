@@ -127,6 +127,16 @@ class RssPlugin(Star):
                 return self.pic_handler.rotate_image_180(file_path)
             return False
 
+        # 辅助函数：处理 Node 内部的内容
+        def _process_node_content(node_component) -> bool:
+            rotated = False
+            node_content = getattr(node_component, "content", [])
+            if isinstance(node_content, list):
+                for sub_comp in node_content:
+                    if _try_rotate_component(sub_comp):
+                        rotated = True
+            return rotated
+
         try:
             await self.context.send_message(user, message_chain)
         except ActionFailed as e:
@@ -140,15 +150,16 @@ class RssPlugin(Star):
                     # 1. 直接是图片
                     if _try_rotate_component(component):
                         has_rotated = True
-                    
-                    # 2. 是Node（合并转发），需要遍历内容
+                    # 2. 是 Nodes 容器，合并转发
+                    elif isinstance(component, Comp.Nodes):
+                        # 遍历容器内的所有 Node
+                        for sub_node in component.nodes:
+                            if _process_node_content(sub_node):
+                                has_rotated = True
+                    # 3. 是 Node 单个节点，单条转发
                     elif isinstance(component, Comp.Node):
-                        node_content = getattr(component, "content", [])
-                        # content可能是列表或MessageChain，这里假设是列表
-                        if isinstance(node_content, list):
-                            for sub_comp in node_content:
-                                if _try_rotate_component(sub_comp):
-                                    has_rotated = True
+                        if _process_node_content(component):
+                            has_rotated = True
                 
                 if has_rotated:
                     try:
@@ -169,15 +180,20 @@ class RssPlugin(Star):
 
     async def cron_task_callback(self, url: str, user: str):
         """定时任务回调"""
-
         if url not in self.data_handler.data:
             return
         if user not in self.data_handler.data[url]["subscribers"]:
             return
 
-        self.logger.info(f"RSS 定时任务触发: {url} - {user}")
-        last_update = self.data_handler.data[url]["subscribers"][user]["last_update"]
-        latest_link = self.data_handler.data[url]["subscribers"][user]["latest_link"]
+        # 1. 构建日志前缀 [RSS][用户][URL末尾] 以隔离日志
+        clean_url = url.split("//")[-1]
+        short_url = "..." + clean_url[-25:] if len(clean_url) > 25 else clean_url
+        log_prefix = f"[RSS][{user}][{short_url}]"
+        self.logger.info(f"{log_prefix} 任务触发")
+
+        sub_info = self.data_handler.data[url]["subscribers"][user]
+        last_update = sub_info["last_update"]
+        latest_link = sub_info["latest_link"]
         max_items_per_poll = self.max_items_per_poll
         # 拉取 RSS
         rss_items = await self.poll_rss(
@@ -186,38 +202,40 @@ class RssPlugin(Star):
             after_timestamp=last_update,
             after_link=latest_link,
         )
-        # 初始化 max_ts 为当前的 last_update
+
+        self.logger.info(f"{log_prefix} 拉取完成，获取到 {len(rss_items)} 条新内容")
         max_ts = last_update
 
-        # 分解MessageSesion
-        # platform_name, message_type, session_id = user.split(":")
-
-        # TODO 分平台处理消息
+        # 处理消息发送
         if self.is_compose:
-            nodes = []
+            # 合并转发模式
+            node_list = []
             for item in rss_items:
                 comps = await self._get_chain_components(item)
+                # 创建单个 Node
                 node = Comp.Node(
                     uin=0,
                     name="Astrbot",
                     content=comps
                 )
-                nodes.append(node)
-                # 消息里最新的那个 pubDate
+                node_list.append(node)
                 if item.pubDate_timestamp > max_ts:
                     max_ts = item.pubDate_timestamp
-
-            # 合并消息发送
-            if len(nodes) > 0:
+            
+            if len(node_list) > 0:
+                # 使用 Comp.Nodes 将列表包装成一个“合并转发容器组件”
+                nodes_container = Comp.Nodes(node_list)
+                # 构造消息链：必须包含容器组件，且关闭 t2i
                 msc = MessageChain(
-                    chain=nodes,
-                    use_t2i_=self.t2i
+                    chain=[nodes_container], 
+                    use_t2i_=False 
                 )
+                self.logger.info(f"{log_prefix} 正在发送合并消息 (包含 {len(node_list)} 条)...")
                 # 调用统一发送方法
                 await self._safe_send_message(user, msc)
         else:
-            # 每个消息单独发送
-            for item in rss_items:
+            # 逐条发送模式
+            for idx, item in enumerate(rss_items):
                 comps = await self._get_chain_components(item)
                 msc = MessageChain(
                     chain=comps,
@@ -225,6 +243,7 @@ class RssPlugin(Star):
                 )
                 # 调用统一发送方法
                 await self._safe_send_message(user, msc)
+                self.logger.info(f"{log_prefix} 第 {idx+1}/{len(rss_items)} 条已发送")
 
                 # 只记录 item 的时间戳，不使用系统时间
                 if item.pubDate_timestamp > max_ts:
