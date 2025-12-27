@@ -6,6 +6,7 @@ import hashlib
 import time
 import tempfile
 import logging
+import asyncio
 from io import BytesIO
 
 
@@ -38,10 +39,14 @@ class RssImageHandler:
         except Exception:
             return os.path.join(self.temp_dir, f"temp_{int(time.time())}.jpg")
 
-    async def get_image_file(self, image_url: str) -> str:
+    async def get_image_file(self, image_url: str, max_retries: int = 3) -> str:
         """
-        下载图片并保存为本地文件。
+        下载图片并保存为本地文件 (包含重试机制)。
         如果文件已存在且有效，则直接返回路径。
+
+        Args:
+            image_url (str): 图片链接
+            max_retries (int): 最大重试次数，默认3次
 
         Returns:
             str: 本地文件的绝对路径。如果失败返回 None。
@@ -53,55 +58,68 @@ class RssImageHandler:
             return save_path
 
         # 2. 下载并处理
-        try:
-            async with aiohttp.ClientSession(trust_env=True) as session:
-                async with session.get(image_url) as resp:
-                    if resp.status != 200:
-                        self.logger.warning(f"[RSS] 无法从URL获取图片: 状态码 {resp.status} - {image_url}")
-                        return None
+        for attempt in range(max_retries):
+            try:
+                # 设置超时，防止单次请求卡死
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+                    async with session.get(image_url) as resp:
+                        if resp.status != 200:
+                            self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次获取图片失败: 状态码 {resp.status} - {image_url}")
+                            # 如果不是200，跳过本次循环，进入下一次重试
+                            continue
 
-                    # 读取图片数据到内存
-                    img_bytes = await resp.read()
+                        # 读取图片数据到内存
+                        img_bytes = await resp.read()
 
-                    # 3. 防和谐处理逻辑
-                    if self.is_adjust_pic:
-                        try:
-                            img_data = BytesIO(img_bytes)
-                            img = Image.open(img_data)
-                            img = img.convert("RGB")
+                        # 3. 防和谐处理逻辑
+                        if self.is_adjust_pic:
+                            try:
+                                img_data = BytesIO(img_bytes)
+                                img = Image.open(img_data)
+                                img = img.convert("RGB")
 
-                            width, height = img.size
-                            pixels = img.load()
-                            corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
-                            # 随机选择一个角落修改像素
-                            chosen_corner = random.choice(corners)
-                            # 修改为接近白色的颜色 (254, 254, 254)
-                            pixels[chosen_corner[0], chosen_corner[1]] = (254, 254, 254)
+                                width, height = img.size
+                                pixels = img.load()
+                                corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+                                # 随机选择一个角落修改像素
+                                chosen_corner = random.choice(corners)
+                                # 修改为接近白色的颜色 (254, 254, 254)
+                                pixels[chosen_corner[0], chosen_corner[1]] = (254, 254, 254)
 
-                            # 保存修改后的图片到文件
-                            img.save(save_path, format="JPEG", quality=90)
-                        except Exception as e:
-                            self.logger.error(f"[RSS] 图片防和谐处理失败: {e}，尝试保存原图")
+                                # 保存修改后的图片到文件
+                                img.save(save_path, format="JPEG", quality=90)
+                            except Exception as e:
+                                self.logger.error(f"[RSS] 图片防和谐处理失败: {e}，尝试保存原图")
+                                with open(save_path, "wb") as f:
+                                    f.write(img_bytes)
+                        else:
+                            # 4. 不需要处理，直接保存原图
                             with open(save_path, "wb") as f:
                                 f.write(img_bytes)
-                    else:
-                        # 4. 不需要处理，直接保存原图
-                        with open(save_path, "wb") as f:
-                            f.write(img_bytes)
 
-                    # 再次确认文件是否写入成功
-                    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                        return save_path
-                    return None
+                        # 再次确认文件是否写入成功
+                        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                            return save_path
+            
+            except asyncio.TimeoutError:
+                self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次下载超时: {image_url}")
+            except Exception as e:
+                self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次下载/保存异常: {e} - {image_url}")
+                # 清理可能的损坏文件
+                if os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)
+                    except:
+                        pass
+            
+            # 如果不是最后一次尝试，等待一小段时间再重试 (1秒, 2秒...)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1 + attempt)
 
-        except Exception as e:
-            self.logger.error(f"[RSS] 图片下载/保存异常 {image_url}: {e}")
-            if os.path.exists(save_path):
-                try:
-                    os.remove(save_path)
-                except:
-                    pass
-            return None
+        # 所有重试都失败
+        self.logger.error(f"[RSS] 图片最终下载失败，已重试 {max_retries} 次: {image_url}")
+        return None
 
     def rotate_image_180(self, file_path: str) -> bool:
         """
