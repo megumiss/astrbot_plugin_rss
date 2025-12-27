@@ -28,7 +28,7 @@ from typing import List
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.1.1",
+    "1.1.2",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
