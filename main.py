@@ -28,7 +28,7 @@ from typing import List, Dict, Tuple, Optional
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.1.5",
+    "1.1.6",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -957,8 +957,21 @@ class RssPlugin(Star):
         # 刷新定时任务
         self._fresh_asyncIOScheduler()
 
+        # 获取新添加订阅的索引
+        user = event.unified_msg_origin
+        subs_urls = self.data_handler.get_subs_channel_url(user)
+        try:
+            new_idx = subs_urls.index(url)
+        except ValueError:
+            new_idx = "未知"
+
         yield event.plain_result(
-            f"添加成功。频道信息：\n标题: {chan_title}\n描述: {chan_desc}"
+            f"✅ 添加成功！\n"
+            f"🔢 索引: {new_idx}\n"
+            f"🔗 链接: {url}\n"
+            f"⏰ Cron: {cron_expr}\n"
+            f"📢 标题: {chan_title}\n"
+            f"📝 描述: {chan_desc}"
         )
 
     @rss.command("add-url")
@@ -994,21 +1007,46 @@ class RssPlugin(Star):
         # 刷新定时任务
         self._fresh_asyncIOScheduler()
 
+        # 获取新添加订阅的索引
+        user = event.unified_msg_origin
+        subs_urls = self.data_handler.get_subs_channel_url(user)
+        try:
+            new_idx = subs_urls.index(url)
+        except ValueError:
+            new_idx = "未知"
+
         yield event.plain_result(
-            f"添加成功。频道信息：\n标题: {chan_title}\n描述: {chan_desc}"
+            f"✅ 添加成功！\n"
+            f"🔢 索引: {new_idx}\n"
+            f"🔗 链接: {url}\n"
+            f"⏰ Cron: {cron_expr}\n"
+            f"📢 标题: {chan_title}\n"
+            f"📝 描述: {chan_desc}"
         )
 
     @rss.command("list")
     async def list_command(self, event: AstrMessageEvent):
         """列出当前所有订阅的RSS频道"""
         user = event.unified_msg_origin
-        ret = "当前订阅的频道：\n"
+        ret = "📋 当前订阅列表：\n"
         subs_urls = self.data_handler.get_subs_channel_url(user)
+        
+        if not subs_urls:
+             yield event.plain_result("当前没有任何订阅。")
+             return
+
         cnt = 0
         for url in subs_urls:
             info = self.data_handler.data[url]["info"]
-            ret += f"{cnt}. {info['title']} - {info['description']}\n"
+            # 获取该用户的 cron 表达式
+            sub_info = self.data_handler.data[url]["subscribers"].get(user, {})
+            cron = sub_info.get("cron_expr", "未知")
+            
+            ret += f"[{cnt}] {info['title']}\n"
+            ret += f"🔗 {url}\n"
+            ret += f"⏰ Cron: {cron}\n"
             cnt += 1
+            
         yield event.plain_result(ret)
 
     @rss.command("remove")
