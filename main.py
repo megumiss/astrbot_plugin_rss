@@ -21,14 +21,14 @@ from aiocqhttp.exceptions import ActionFailed
 from .data_handler import DataHandler
 from .pic_handler import RssImageHandler
 from .rss import RSSItem
-from typing import List
+from typing import List, Dict
 
 
 @register(
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.1.2",
+    "1.1.3",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -58,6 +58,12 @@ class RssPlugin(Star):
         self.time_zone = config.get("time_zone", "Asia/Shanghai")
         
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
+        
+        # 缓存与锁
+        self.cache_timeout = config.get("cache_timeout") # 缓存有效期
+        self.feed_cache: Dict[str, Dict] = {}  # 格式: {url: {'ts': timestamp, 'items': [RSSItem]}}
+        self.fetch_locks: Dict[str, asyncio.Lock] = {} # 格式: {url: asyncio.Lock()}
+
         self.scheduler = AsyncIOScheduler()
         self.scheduler.start()
 
@@ -260,14 +266,11 @@ class RssPlugin(Star):
         else:
             self.logger.info(f"RSS 定时任务 {url} 无消息更新 - {user}")
 
-    async def poll_rss(
-        self,
-        url: str,
-        num: int = -1,
-        after_timestamp: int = 0,
-        after_link: str = "",
-    ) -> List[RSSItem]:
-        """从站点拉取RSS信息"""
+    async def _fetch_and_parse_feed(self, url: str) -> List[RSSItem]:
+        """
+        [内部方法] 执行实际的网络请求并解析所有 RSS 条目
+        不执行任何过滤（时间戳/数量），只负责解析并返回对象列表
+        """
         text = await self.parse_channel_info(url)
         if text is None:
             self.logger.error(f"rss: 无法解析站点 {url} 的RSS信息")
@@ -282,23 +285,23 @@ class RssPlugin(Star):
         # 检测是RSS还是Atom
         is_atom = root.tag.endswith('feed') or 'atom' in root.tag.lower()
         
-        # 根据格式选择item路径 - 使用local-name()避免命名空间问题
+        # 根据格式选择item路径
         if is_atom:
             items = root.xpath("//*[local-name()='entry']")
         else:
             items = root.xpath("//item")
 
-        cnt = 0
-        rss_items = []
+        rss_items_list = []
+
+        # 获取频道标题，用于填充 RSSItem
+        chan_title = (
+            self.data_handler.data[url]["info"]["title"]
+            if url in self.data_handler.data
+            else "未知频道"
+        )
 
         for item in items:
             try:
-                chan_title = (
-                    self.data_handler.data[url]["info"]["title"]
-                    if url in self.data_handler.data
-                    else "未知频道"
-                )
-
                 # 提取标题
                 if is_atom:
                     title_elem = item.xpath("*[local-name()='title']")
@@ -420,47 +423,104 @@ class RssPlugin(Star):
                 if pub_date:
                     pub_date_timestamp = self._parse_date(pub_date)
                 
-                # 判断是否为新内容
-                is_new = False
-                if pub_date_timestamp > 0:
-                    # 只有当文章的发布时间严格晚于上次记录的时间时，才算新消息
-                    is_new = pub_date_timestamp > after_timestamp
-                else:
-                    # 如果没有时间戳，退化为判断链接
-                    is_new = link != after_link
-                
-                if is_new:
-                    rss_items.append(
-                        RSSItem(
-                            chan_title=chan_title,
-                            title=title,
-                            link=link,
-                            description=clean_description,
-                            pubDate=pub_date,
-                            pubDate_timestamp=pub_date_timestamp,
-                            pic_urls=pic_url_list,
-                            author=author,
-                            categories=categories,
-                            content=clean_content,
-                            summary=summary,
-                            enclosure_url=enclosure_url,
-                            enclosure_type=enclosure_type,
-                            comments_url=comments_url,
-                            guid=guid
-                        )
+                # 将解析好的对象加入列表
+                rss_items_list.append(
+                    RSSItem(
+                        chan_title=chan_title,
+                        title=title,
+                        link=link,
+                        description=clean_description,
+                        pubDate=pub_date,
+                        pubDate_timestamp=pub_date_timestamp,
+                        pic_urls=pic_url_list,
+                        author=author,
+                        categories=categories,
+                        content=clean_content,
+                        summary=summary,
+                        enclosure_url=enclosure_url,
+                        enclosure_type=enclosure_type,
+                        comments_url=comments_url,
+                        guid=guid
                     )
-                    cnt += 1
-                    if num != -1 and cnt >= num:
-                        break
-                elif pub_date_timestamp > 0:
-                    # 如果当前条目的时间戳小于等于上次更新时间，直接停止
-                    break
+                )
 
             except Exception as e:
                 self.logger.error(f"rss: 解析Rss条目 {url} 失败: {str(e)}")
-                break
+                continue
 
-        return rss_items
+        return rss_items_list
+
+    async def _get_feed_data_safe(self, url: str) -> List[RSSItem]:
+        """
+        获取 Feed 数据，带有 缓存 和 锁 机制
+        """
+        # 1. 确保每个 URL 都有一个对应的锁，防止并发请求
+        if url not in self.fetch_locks:
+            self.fetch_locks[url] = asyncio.Lock()
+        
+        # 2. 上锁
+        async with self.fetch_locks[url]:
+            current_time = time.time()
+            
+            # 3. 检查缓存是否有效
+            if url in self.feed_cache:
+                cache_data = self.feed_cache[url]
+                # 如果缓存时间在有效期内（例如60秒），直接返回
+                if current_time - cache_data['ts'] < self.cache_timeout:
+                    # self.logger.debug(f"[RSS] Hit cache for {url}")
+                    return cache_data['items']
+            
+            # 4. 缓存失效或不存在，执行网络请求
+            items = await self._fetch_and_parse_feed(url)
+            
+            # 5. 更新缓存
+            self.feed_cache[url] = {
+                'ts': current_time,
+                'items': items
+            }
+            return items
+
+    async def poll_rss(
+        self,
+        url: str,
+        num: int = -1,
+        after_timestamp: int = 0,
+        after_link: str = "",
+    ) -> List[RSSItem]:
+        """
+        从站点拉取RSS信息 (优化版)
+        先从缓存/网络获取全量数据，再根据 timestamp 进行过滤
+        """
+        # 获取全量条目（带缓存）
+        all_items = await self._get_feed_data_safe(url)
+        
+        filtered_items = []
+        cnt = 0
+        
+        # 遍历全量条目进行过滤
+        for item in all_items:
+            is_new = False
+            
+            # 判断是否为新内容
+            if item.pubDate_timestamp > 0:
+                # 时间戳必须严格大于上次更新时间
+                is_new = item.pubDate_timestamp > after_timestamp
+            else:
+                # 无时间戳退化为链接判断
+                is_new = item.link != after_link
+            
+            if is_new:
+                filtered_items.append(item)
+                cnt += 1
+                if num != -1 and cnt >= num:
+                    break
+            elif item.pubDate_timestamp > 0:
+                # 假设 RSS 是按时间倒序排列的，一旦遇到旧消息，后面的肯定更旧
+                # 注意：如果 RSS 乱序，这里可能需要调整，但标准 RSS 默认是有序的
+                if item.pubDate_timestamp <= after_timestamp:
+                    break
+        
+        return filtered_items
 
     def _parse_date(self, date_str: str) -> int:
         """解析各种日期格式为时间戳"""

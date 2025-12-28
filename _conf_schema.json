@@ -32,6 +32,13 @@
         "obvious_hint": true,
         "default": 3
     },
+    "cache_timeout": {
+        "description": "RSS缓存有效期（秒）。",
+        "type": "int",
+        "hint": "",
+        "obvious_hint": true,
+        "default": 60
+    },
     "is_hide_url": {
         "description": "是否隐藏链接",
         "type": "bool",
@@ -39,7 +46,7 @@
         "obvious_hint": true,
         "default": false
     },
-        "time_zone": {
+    "time_zone": {
         "type": "string",
         "description": "时间显示时区（IANA 标准名称）",
         "hint": "例如: Asia/Shanghai, UTC",
