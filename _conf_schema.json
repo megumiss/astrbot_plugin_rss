@@ -41,7 +41,7 @@
     "cache_timeout": {
         "description": "RSS缓存有效期（秒）。",
         "type": "int",
-        "hint": "",
+        "hint": "同一订阅源在多用户订阅时，多少秒内不再重复请求。",
         "obvious_hint": true,
         "default": 60
     },

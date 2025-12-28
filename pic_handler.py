@@ -7,15 +7,16 @@ import time
 import tempfile
 import logging
 import asyncio
+from urllib.parse import urlparse
 from io import BytesIO
 
 
 class RssImageHandler:
-    """rss处理图片的类"""
+    """rss处理图片/视频的类"""
 
     def __init__(self, is_adjust_pic=False):
         """
-        初始化图片处理类
+        初始化媒体处理类
 
         Args:
             is_adjust_pic (bool): 是否防和谐，默认为 False。
@@ -32,18 +33,25 @@ class RssImageHandler:
                 self.logger.error(f"[RSS] 创建临时目录失败: {e}")
 
     def _get_file_path(self, url: str) -> str:
-        """根据URL生成唯一的文件路径 (MD5)"""
+        """根据URL生成唯一的文件路径 (MD5)，保留后缀"""
         try:
             hash_name = hashlib.md5(url.encode("utf-8")).hexdigest()
-            url_lower = url.lower()
-            if url_lower.endswith(".gif"):
+            # 解析 URL 路径部分来判断后缀，忽略 query 参数 (如 ?tag=21)
+            parsed = urlparse(url)
+            path_lower = parsed.path.lower()
+            
+            if path_lower.endswith(".gif"):
                 ext = ".gif"
-            elif url_lower.endswith(".mp4"):
+            elif path_lower.endswith(".mp4"):
                 ext = ".mp4"
-            elif url_lower.endswith(".png"):
+            elif path_lower.endswith(".png"):
                 ext = ".png"
-            else:
+            elif path_lower.endswith(".jpg") or path_lower.endswith(".jpeg"):
                 ext = ".jpg"
+            else:
+                # 默认后缀
+                ext = ".jpg"
+                
             return os.path.join(self.temp_dir, f"{hash_name}{ext}")
         except Exception:
             return os.path.join(self.temp_dir, f"temp_{int(time.time())}.jpg")
@@ -81,8 +89,8 @@ class RssImageHandler:
                         # 读取图片数据到内存
                         img_bytes = await resp.read()
                         
-                        # 判断是否为 GIF
-                        is_gif = image_url.lower().endswith(".gif") or save_path.endswith(".gif")
+                        # 判断是否为 GIF (通过URL或文件名)
+                        is_gif = save_path.endswith(".gif")
 
                         # 3. 防和谐处理逻辑 (如果是GIF则跳过)
                         if self.is_adjust_pic and not is_gif:
@@ -135,9 +143,13 @@ class RssImageHandler:
 
     async def get_video_file(self, video_url: str, max_retries: int = 3) -> str:
         """
-        下载视频并保存为本地文件 (包含重试机制)。
+        下载视频并保存为本地文件。
         """
+        # 强制修正后缀，因为 URL 可能不带扩展名或者带参数，但此处明确请求的是视频
         save_path = self._get_file_path(video_url)
+        if not save_path.endswith(".mp4"):
+             # 如果自动检测没有识别出mp4，强制加上
+             save_path = os.path.splitext(save_path)[0] + ".mp4"
 
         # 1. 检查缓存
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:

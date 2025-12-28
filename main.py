@@ -28,7 +28,7 @@ from typing import List, Dict, Tuple, Optional
     "astrbot_plugin_rss",
     "megumiss",
     "RSS订阅插件",
-    "1.1.3",
+    "1.1.5",
     "https://github.com/megumiss/astrbot_plugin_rss",
 )
 class RssPlugin(Star):
@@ -47,7 +47,7 @@ class RssPlugin(Star):
         self.t2i = config.get("t2i")
         self.is_hide_url = config.get("is_hide_url")
         self.is_compose = config.get("compose")
-        self.is_download_video = config.get("is_download_video", False) # 新增配置
+        self.is_download_video = config.get("is_download_video", False)
         
         # 图片配置
         self.is_read_pic = config.get("pic_config").get("is_read_pic")
@@ -61,7 +61,7 @@ class RssPlugin(Star):
         self.pic_handler = RssImageHandler(self.is_adjust_pic)
         
         # 缓存与锁
-        self.cache_timeout = config.get("cache_timeout") # 缓存有效期
+        self.cache_timeout = config.get("cache_timeout", 60) # 缓存有效期
         self.feed_cache: Dict[str, Dict] = {}  # 格式: {url: {'ts': timestamp, 'items': [RSSItem]}}
         self.fetch_locks: Dict[str, asyncio.Lock] = {} # 格式: {url: asyncio.Lock()}
 
@@ -415,7 +415,15 @@ class RssPlugin(Star):
                 
                 # 处理内容 - 使用完整内容或描述
                 full_content = content or description
-                pic_url_list = self.data_handler.strip_html_pic(full_content)
+                
+                # 使用 extract_media_urls 来全面提取图片和视频
+                media_data = self.data_handler.extract_media_urls(full_content)
+                pic_url_list = media_data["images"]
+                
+                # 如果原生没有附件，但 HTML 中提取到了视频，则将第一个视频作为附件
+                if not enclosure_url and media_data["videos"]:
+                    enclosure_url = media_data["videos"][0]
+                    enclosure_type = "video/mp4" # 假设为 mp4，后续下载会校验
                 
                 # 清理HTML得到纯文本描述
                 clean_description = self.data_handler.strip_html(description or content)
@@ -640,7 +648,7 @@ class RssPlugin(Star):
             # 解析 Cron 表达式
             cron_args = self.parse_cron_expr(self.cleanup_cron)
             retention_seconds = self.cleanup_retention * 60
-            self.logger.info(f"[RSS] 注册图片清理任务: Cron[{self.cleanup_cron}] 保留时长[{self.cleanup_retention}分钟]")
+            self.logger.info(f"[RSS] 注册图片/视频清理任务: Cron[{self.cleanup_cron}] 保留时长[{self.cleanup_retention}分钟]")
             
             self.scheduler.add_job(
                 self.pic_handler.cleanup_temp_files,
@@ -703,7 +711,11 @@ class RssPlugin(Star):
         return self.data_handler.data[url]["info"]
 
     async def _get_chain_components(self, item: RSSItem) -> Tuple[List[any], Optional[any]]:
-        """组装消息链"""
+        """
+        组装消息链
+        Returns:
+            Tuple[List[Component], Optional[Component]]: (主体消息组件列表, 视频组件(若有))
+        """
         comps = []
         # 收集所有的文本行
         text_lines = []
@@ -765,7 +777,7 @@ class RssPlugin(Star):
             enclosure_info += item.enclosure_url
             text_lines.append(enclosure_info)
 
-            # 视频处理
+            # 视频组件处理
             if is_video:
                 if self.is_download_video:
                     file_path = await self.pic_handler.get_video_file(item.enclosure_url)
@@ -1044,16 +1056,15 @@ class RssPlugin(Star):
         
         # 区分平台构造消息链
         if self.is_compose:
-            # 文本和图片 Node
-            nodes_list = []
+            # 1. 文本和图片 Node
             node = Comp.Node(
                     uin=0,
                     name="Astrbot",
                     content=main_comps
                 )
-            nodes_list.append(node)
-            
-            # 如果有视频，作为单独的 Node 添加
+            nodes_list = [node]
+
+            # 2. 视频 Node
             if video_comp:
                 video_node = Comp.Node(
                     uin=0,
@@ -1067,11 +1078,11 @@ class RssPlugin(Star):
             target_message_chain = MessageChain(chain=[nodes_container], use_t2i_=False)
             await self._safe_send_message(event.unified_msg_origin, target_message_chain)
         else:
-            # 单条发送：先发主体
+            # 单条发送模式
             target_message_chain = MessageChain(chain=main_comps, use_t2i_=self.t2i)
             await self._safe_send_message(event.unified_msg_origin, target_message_chain)
             
-            # 再发视频
+            # 视频独立发送
             if video_comp:
                 video_chain = MessageChain(chain=[video_comp], use_t2i_=False)
                 await self._safe_send_message(event.unified_msg_origin, video_chain)
