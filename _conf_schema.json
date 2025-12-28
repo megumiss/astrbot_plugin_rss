@@ -25,6 +25,12 @@
         "hint": "订阅中的图片内容会丢失",
         "default": false
     },
+    "is_download_video": {
+        "description": "是否下载视频",
+        "type": "bool",
+        "hint": "开启后会下载视频文件并发送（需要较大的网络带宽），关闭则直接发送视频链接",
+        "default": false
+    },
     "max_items_per_poll": {
         "description": "每次获取的最大条目数。",
         "type": "int",

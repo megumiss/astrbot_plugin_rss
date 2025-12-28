@@ -35,7 +35,16 @@ class RssImageHandler:
         """根据URL生成唯一的文件路径 (MD5)"""
         try:
             hash_name = hashlib.md5(url.encode("utf-8")).hexdigest()
-            return os.path.join(self.temp_dir, f"{hash_name}.jpg")
+            url_lower = url.lower()
+            if url_lower.endswith(".gif"):
+                ext = ".gif"
+            elif url_lower.endswith(".mp4"):
+                ext = ".mp4"
+            elif url_lower.endswith(".png"):
+                ext = ".png"
+            else:
+                ext = ".jpg"
+            return os.path.join(self.temp_dir, f"{hash_name}{ext}")
         except Exception:
             return os.path.join(self.temp_dir, f"temp_{int(time.time())}.jpg")
 
@@ -71,9 +80,12 @@ class RssImageHandler:
 
                         # 读取图片数据到内存
                         img_bytes = await resp.read()
+                        
+                        # 判断是否为 GIF
+                        is_gif = image_url.lower().endswith(".gif") or save_path.endswith(".gif")
 
-                        # 3. 防和谐处理逻辑
-                        if self.is_adjust_pic:
+                        # 3. 防和谐处理逻辑 (如果是GIF则跳过)
+                        if self.is_adjust_pic and not is_gif:
                             try:
                                 img_data = BytesIO(img_bytes)
                                 img = Image.open(img_data)
@@ -94,7 +106,7 @@ class RssImageHandler:
                                 with open(save_path, "wb") as f:
                                     f.write(img_bytes)
                         else:
-                            # 4. 不需要处理，直接保存原图
+                            # 4. 不需要处理(或GIF)，直接保存原图
                             with open(save_path, "wb") as f:
                                 f.write(img_bytes)
 
@@ -121,6 +133,49 @@ class RssImageHandler:
         self.logger.error(f"[RSS] 图片最终下载失败，已重试 {max_retries} 次: {image_url}")
         return None
 
+    async def get_video_file(self, video_url: str, max_retries: int = 3) -> str:
+        """
+        下载视频并保存为本地文件 (包含重试机制)。
+        """
+        save_path = self._get_file_path(video_url)
+
+        # 1. 检查缓存
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+            return save_path
+
+        # 2. 下载
+        for attempt in range(max_retries):
+            try:
+                # 视频文件较大，设置更长的超时
+                timeout = aiohttp.ClientTimeout(total=120, connect=10)
+                async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+                    async with session.get(video_url) as resp:
+                        if resp.status != 200:
+                            self.logger.warning(f"[RSS] 视频下载失败: {resp.status} - {video_url}")
+                            continue
+
+                        # 流式写入，避免内存占用过大
+                        with open(save_path, 'wb') as f:
+                            async for chunk in resp.content.iter_chunked(1024):
+                                f.write(chunk)
+
+                        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                            return save_path
+            
+            except Exception as e:
+                self.logger.warning(f"[RSS] 视频下载异常: {e} - {video_url}")
+                if os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)
+                    except:
+                        pass
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 + attempt)
+
+        self.logger.error(f"[RSS] 视频最终下载失败: {video_url}")
+        return None
+
     def rotate_image_180(self, file_path: str) -> bool:
         """
         读取指定路径的图片，旋转180度并覆盖保存
@@ -128,6 +183,9 @@ class RssImageHandler:
         """
         try:
             if not os.path.exists(file_path):
+                return False
+            # GIF 不支持旋转处理
+            if file_path.lower().endswith(".gif"):
                 return False
             
             # 打开图片
@@ -168,6 +226,6 @@ class RssImageHandler:
                         continue
 
             if count > 0:
-                self.logger.info(f"[RSS] 已清理 {count} 个过期临时图片文件 (阈值: {max_age_seconds}s)")
+                self.logger.info(f"[RSS] 已清理 {count} 个过期临时文件 (阈值: {max_age_seconds}s)")
         except Exception as e:
             self.logger.error(f"[RSS] 清理临时文件失败: {e}")

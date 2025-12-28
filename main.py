@@ -21,7 +21,7 @@ from aiocqhttp.exceptions import ActionFailed
 from .data_handler import DataHandler
 from .pic_handler import RssImageHandler
 from .rss import RSSItem
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional
 
 
 @register(
@@ -39,8 +39,7 @@ class RssPlugin(Star):
         self.context = context
         self.config = config
         self.data_handler = DataHandler()
-        self.pic_handler = RssImageHandler()
-
+        
         # 提取scheme文件中的配置
         self.title_max_length = config.get("title_max_length")
         self.description_max_length = config.get("description_max_length")
@@ -48,6 +47,8 @@ class RssPlugin(Star):
         self.t2i = config.get("t2i")
         self.is_hide_url = config.get("is_hide_url")
         self.is_compose = config.get("compose")
+        self.is_download_video = config.get("is_download_video", False) # 新增配置
+        
         # 图片配置
         self.is_read_pic = config.get("pic_config").get("is_read_pic")
         self.is_adjust_pic = config.get("pic_config").get("is_adjust_pic")
@@ -217,14 +218,25 @@ class RssPlugin(Star):
             # 合并转发模式
             node_list = []
             for item in rss_items:
-                comps = await self._get_chain_components(item)
-                # 创建单个 Node
+                main_comps, video_comp = await self._get_chain_components(item)
+                
+                # 1. 文本和图片
                 node = Comp.Node(
                     uin=0,
                     name="Astrbot",
-                    content=comps
+                    content=main_comps
                 )
                 node_list.append(node)
+                
+                # 2. 视频单独作为一个Node
+                if video_comp:
+                    video_node = Comp.Node(
+                        uin=0,
+                        name="Astrbot",
+                        content=[video_comp]
+                    )
+                    node_list.append(video_node)
+
                 if item.pubDate_timestamp > max_ts:
                     max_ts = item.pubDate_timestamp
             
@@ -242,13 +254,20 @@ class RssPlugin(Star):
         else:
             # 逐条发送模式
             for idx, item in enumerate(rss_items):
-                comps = await self._get_chain_components(item)
+                main_comps, video_comp = await self._get_chain_components(item)
+                
+                # 发送主体内容
                 msc = MessageChain(
-                    chain=comps,
+                    chain=main_comps,
                     use_t2i_=self.t2i
                 )
-                # 调用统一发送方法
                 await self._safe_send_message(user, msc)
+                
+                # 如果有视频，单独发送一条消息
+                if video_comp:
+                    video_msc = MessageChain(chain=[video_comp], use_t2i_=False)
+                    await self._safe_send_message(user, video_msc)
+
                 self.logger.info(f"{log_prefix} 第 {idx+1}/{len(rss_items)} 条已发送")
 
                 # 只记录 item 的时间戳，不使用系统时间
@@ -683,11 +702,12 @@ class RssPlugin(Star):
         self.data_handler.save_data()
         return self.data_handler.data[url]["info"]
 
-    async def _get_chain_components(self, item: RSSItem):
+    async def _get_chain_components(self, item: RSSItem) -> Tuple[List[any], Optional[any]]:
         """组装消息链"""
         comps = []
         # 收集所有的文本行
         text_lines = []
+        video_comp = None
         
         # 标题和频道信息
         text_lines.append(f"📰 {item.chan_title}")
@@ -733,14 +753,28 @@ class RssPlugin(Star):
         if item.enclosure_url:
             text_lines.append("") # 空行分隔
             enclosure_info = "📎 附件: "
+            is_video = False
+            
             if "audio" in item.enclosure_type:
                 enclosure_info += "🎵 音频 - "
             elif "video" in item.enclosure_type:
                 enclosure_info += "🎬 视频 - "
+                is_video = True
             else:
                 enclosure_info += "📄 文件 - "
             enclosure_info += item.enclosure_url
             text_lines.append(enclosure_info)
+
+            # 视频处理
+            if is_video:
+                if self.is_download_video:
+                    file_path = await self.pic_handler.get_video_file(item.enclosure_url)
+                    if file_path:
+                        video_comp = Comp.Video.fromFileSystem(path=file_path)
+                    else:
+                        text_lines.append("[❌] 视频下载失败")
+                else:
+                    video_comp = Comp.Video.fromURL(url=item.enclosure_url)
             
         # 评论链接
         if item.comments_url:
@@ -777,7 +811,7 @@ class RssPlugin(Star):
                 count = len(item.pic_urls) - temp_max_pic_item
                 comps.append(Comp.Plain(f"\n... 还有 {count} 张图片未显示"))
         
-        return comps
+        return comps, video_comp
 
 
     def _is_url_or_ip(self,text: str) -> bool:
@@ -1004,22 +1038,40 @@ class RssPlugin(Star):
         item = rss_items[0]
         # 分解MessageSesion
         platform_name, message_type, session_id = event.unified_msg_origin.split(":")
-        # 构造返回消息链
-        comps = await self._get_chain_components(item)
         
-        target_message_chain = None
-
+        # 构造返回消息链
+        main_comps, video_comp = await self._get_chain_components(item)
+        
         # 区分平台构造消息链
-        # TODO isinstance(event, AiocqhttpMessageEvent)
         if self.is_compose:
+            # 文本和图片 Node
+            nodes_list = []
             node = Comp.Node(
                     uin=0,
                     name="Astrbot",
-                    content=comps
+                    content=main_comps
                 )
-            target_message_chain = MessageChain(chain=[node], use_t2i_=self.t2i)
+            nodes_list.append(node)
+            
+            # 如果有视频，作为单独的 Node 添加
+            if video_comp:
+                video_node = Comp.Node(
+                    uin=0,
+                    name="Astrbot",
+                    content=[video_comp]
+                )
+                nodes_list.append(video_node)
+            
+            # 发送合并消息
+            nodes_container = Comp.Nodes(nodes_list)
+            target_message_chain = MessageChain(chain=[nodes_container], use_t2i_=False)
+            await self._safe_send_message(event.unified_msg_origin, target_message_chain)
         else:
-            target_message_chain = MessageChain(chain=comps, use_t2i_=self.t2i)
-        
-        # 使用统一的发送方法
-        await self._safe_send_message(event.unified_msg_origin, target_message_chain)
+            # 单条发送：先发主体
+            target_message_chain = MessageChain(chain=main_comps, use_t2i_=self.t2i)
+            await self._safe_send_message(event.unified_msg_origin, target_message_chain)
+            
+            # 再发视频
+            if video_comp:
+                video_chain = MessageChain(chain=[video_comp], use_t2i_=False)
+                await self._safe_send_message(event.unified_msg_origin, video_chain)

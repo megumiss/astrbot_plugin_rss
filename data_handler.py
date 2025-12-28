@@ -82,9 +82,8 @@ class DataHandler:
         for img in soup.find_all('img'):
             img_src = img.get('src') or img.get('data-src')  # 支持懒加载图片
             if img_src:
-                # 过滤掉tracking pixels和emoji
-                if not any(x in img_src.lower() for x in ['tracking', 'pixel', 'emoji', 'icon']) and \
-                   not img_src.endswith('.gif') or 'github' in img_src:
+                # 过滤掉tracking pixels和emoji，保留gif
+                if not any(x in img_src.lower() for x in ['tracking', 'pixel', 'emoji', 'icon']) or 'github' in img_src:
                     ordered_content.append(img_src)
 
         return ordered_content
