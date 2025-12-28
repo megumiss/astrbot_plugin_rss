@@ -1,14 +1,15 @@
-from PIL import Image
-import aiohttp
-import random
-import os
-import hashlib
-import time
-import tempfile
-import logging
 import asyncio
-from urllib.parse import urlparse
+import hashlib
+import logging
+import os
+import random
+import tempfile
+import time
 from io import BytesIO
+from urllib.parse import urlparse
+
+import aiohttp
+from PIL import Image
 
 
 class RssImageHandler:
@@ -22,39 +23,39 @@ class RssImageHandler:
             is_adjust_pic (bool): 是否防和谐，默认为 False。
         """
         self.is_adjust_pic = is_adjust_pic
-        self.logger = logging.getLogger("astrbot")
+        self.logger = logging.getLogger('astrbot')
 
         # 临时目录
-        self.temp_dir = os.path.join(tempfile.gettempdir(), "astrbot_rss_cache")
+        self.temp_dir = os.path.join(tempfile.gettempdir(), 'astrbot_rss_cache')
         if not os.path.exists(self.temp_dir):
             try:
                 os.makedirs(self.temp_dir, exist_ok=True)
             except Exception as e:
-                self.logger.error(f"[RSS] 创建临时目录失败: {e}")
+                self.logger.error(f'[RSS] 创建临时目录失败: {e}')
 
     def _get_file_path(self, url: str) -> str:
         """根据URL生成唯一的文件路径 (MD5)，保留后缀"""
         try:
-            hash_name = hashlib.md5(url.encode("utf-8")).hexdigest()
+            hash_name = hashlib.md5(url.encode('utf-8')).hexdigest()
             # 解析 URL 路径部分来判断后缀，忽略 query 参数 (如 ?tag=21)
             parsed = urlparse(url)
             path_lower = parsed.path.lower()
-            
-            if path_lower.endswith(".gif"):
-                ext = ".gif"
-            elif path_lower.endswith(".mp4"):
-                ext = ".mp4"
-            elif path_lower.endswith(".png"):
-                ext = ".png"
-            elif path_lower.endswith(".jpg") or path_lower.endswith(".jpeg"):
-                ext = ".jpg"
+
+            if path_lower.endswith('.gif'):
+                ext = '.gif'
+            elif path_lower.endswith('.mp4'):
+                ext = '.mp4'
+            elif path_lower.endswith('.png'):
+                ext = '.png'
+            elif path_lower.endswith('.jpg') or path_lower.endswith('.jpeg'):
+                ext = '.jpg'
             else:
                 # 默认后缀
-                ext = ".jpg"
-                
-            return os.path.join(self.temp_dir, f"{hash_name}{ext}")
+                ext = '.jpg'
+
+            return os.path.join(self.temp_dir, f'{hash_name}{ext}')
         except Exception:
-            return os.path.join(self.temp_dir, f"temp_{int(time.time())}.jpg")
+            return os.path.join(self.temp_dir, f'temp_{int(time.time())}.jpg')
 
     async def get_image_file(self, image_url: str, max_retries: int = 3) -> str:
         """
@@ -82,22 +83,24 @@ class RssImageHandler:
                 async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
                     async with session.get(image_url) as resp:
                         if resp.status != 200:
-                            self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次获取图片失败: 状态码 {resp.status} - {image_url}")
+                            self.logger.warning(
+                                f'[RSS] 第 {attempt + 1}/{max_retries} 次获取图片失败: 状态码 {resp.status} - {image_url}'
+                            )
                             # 如果不是200，跳过本次循环，进入下一次重试
                             continue
 
                         # 读取图片数据到内存
                         img_bytes = await resp.read()
-                        
+
                         # 判断是否为 GIF (通过URL或文件名)
-                        is_gif = save_path.endswith(".gif")
+                        is_gif = save_path.endswith('.gif')
 
                         # 3. 防和谐处理逻辑 (如果是GIF则跳过)
                         if self.is_adjust_pic and not is_gif:
                             try:
                                 img_data = BytesIO(img_bytes)
                                 img = Image.open(img_data)
-                                img = img.convert("RGB")
+                                img = img.convert('RGB')
 
                                 width, height = img.size
                                 pixels = img.load()
@@ -108,37 +111,37 @@ class RssImageHandler:
                                 pixels[chosen_corner[0], chosen_corner[1]] = (254, 254, 254)
 
                                 # 保存修改后的图片到文件
-                                img.save(save_path, format="JPEG", quality=90)
+                                img.save(save_path, format='JPEG', quality=90)
                             except Exception as e:
-                                self.logger.error(f"[RSS] 图片防和谐处理失败: {e}，尝试保存原图")
-                                with open(save_path, "wb") as f:
+                                self.logger.error(f'[RSS] 图片防和谐处理失败: {e}，尝试保存原图')
+                                with open(save_path, 'wb') as f:
                                     f.write(img_bytes)
                         else:
                             # 4. 不需要处理(或GIF)，直接保存原图
-                            with open(save_path, "wb") as f:
+                            with open(save_path, 'wb') as f:
                                 f.write(img_bytes)
 
                         # 再次确认文件是否写入成功
                         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
                             return save_path
-            
+
             except asyncio.TimeoutError:
-                self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次下载超时: {image_url}")
+                self.logger.warning(f'[RSS] 第 {attempt + 1}/{max_retries} 次下载超时: {image_url}')
             except Exception as e:
-                self.logger.warning(f"[RSS] 第 {attempt + 1}/{max_retries} 次下载/保存异常: {e} - {image_url}")
+                self.logger.warning(f'[RSS] 第 {attempt + 1}/{max_retries} 次下载/保存异常: {e} - {image_url}')
                 # 清理可能的损坏文件
                 if os.path.exists(save_path):
                     try:
                         os.remove(save_path)
                     except:
                         pass
-            
+
             # 如果不是最后一次尝试，等待一小段时间再重试 (1秒, 2秒...)
             if attempt < max_retries - 1:
                 await asyncio.sleep(1 + attempt)
 
         # 所有重试都失败
-        self.logger.error(f"[RSS] 图片最终下载失败，已重试 {max_retries} 次: {image_url}")
+        self.logger.error(f'[RSS] 图片最终下载失败，已重试 {max_retries} 次: {image_url}')
         return None
 
     async def get_video_file(self, video_url: str, max_retries: int = 3) -> str:
@@ -147,9 +150,9 @@ class RssImageHandler:
         """
         # 强制修正后缀，因为 URL 可能不带扩展名或者带参数，但此处明确请求的是视频
         save_path = self._get_file_path(video_url)
-        if not save_path.endswith(".mp4"):
-             # 如果自动检测没有识别出mp4，强制加上
-             save_path = os.path.splitext(save_path)[0] + ".mp4"
+        if not save_path.endswith('.mp4'):
+            # 如果自动检测没有识别出mp4，强制加上
+            save_path = os.path.splitext(save_path)[0] + '.mp4'
 
         # 1. 检查缓存
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
@@ -163,7 +166,7 @@ class RssImageHandler:
                 async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
                     async with session.get(video_url) as resp:
                         if resp.status != 200:
-                            self.logger.warning(f"[RSS] 视频下载失败: {resp.status} - {video_url}")
+                            self.logger.warning(f'[RSS] 视频下载失败: {resp.status} - {video_url}')
                             continue
 
                         # 流式写入，避免内存占用过大
@@ -173,19 +176,19 @@ class RssImageHandler:
 
                         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
                             return save_path
-            
+
             except Exception as e:
-                self.logger.warning(f"[RSS] 视频下载异常: {e} - {video_url}")
+                self.logger.warning(f'[RSS] 视频下载异常: {e} - {video_url}')
                 if os.path.exists(save_path):
                     try:
                         os.remove(save_path)
                     except:
                         pass
-            
+
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 + attempt)
 
-        self.logger.error(f"[RSS] 视频最终下载失败: {video_url}")
+        self.logger.error(f'[RSS] 视频最终下载失败: {video_url}')
         return None
 
     def rotate_image_180(self, file_path: str) -> bool:
@@ -197,20 +200,20 @@ class RssImageHandler:
             if not os.path.exists(file_path):
                 return False
             # GIF 不支持旋转处理
-            if file_path.lower().endswith(".gif"):
+            if file_path.lower().endswith('.gif'):
                 return False
-            
+
             # 打开图片
             img = Image.open(file_path)
             # 旋转 180 度
             img = img.transpose(Image.ROTATE_180)
             # 覆盖保存
             img.save(file_path, quality=85)
-            
-            self.logger.warning(f"[RSS] 以此尝试绕过风控: 已将图片旋转180度 -> {os.path.basename(file_path)}")
+
+            self.logger.warning(f'[RSS] 以此尝试绕过风控: 已将图片旋转180度 -> {os.path.basename(file_path)}')
             return True
         except Exception as e:
-            self.logger.error(f"[RSS] 旋转图片失败: {e}")
+            self.logger.error(f'[RSS] 旋转图片失败: {e}')
             return False
 
     def cleanup_temp_files(self, max_age_seconds=3600):
@@ -238,6 +241,6 @@ class RssImageHandler:
                         continue
 
             if count > 0:
-                self.logger.info(f"[RSS] 已清理 {count} 个过期临时文件 (阈值: {max_age_seconds}s)")
+                self.logger.info(f'[RSS] 已清理 {count} 个过期临时文件 (阈值: {max_age_seconds}s)')
         except Exception as e:
-            self.logger.error(f"[RSS] 清理临时文件失败: {e}")
+            self.logger.error(f'[RSS] 清理临时文件失败: {e}')
