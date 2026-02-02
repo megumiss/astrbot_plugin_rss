@@ -8,7 +8,7 @@ from lxml import etree
 
 
 class DataHandler:
-    def __init__(self, config_path='data/astrbot_plugin_rss_data.json', default_config=None):
+    def __init__(self, config_path, default_config=None):
         self.config_path = config_path
         self.default_config = default_config or {'rsshub_endpoints': []}
         self.data = self.load_data()

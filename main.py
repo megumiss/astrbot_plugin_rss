@@ -17,7 +17,7 @@ from astrbot.api import AstrBotConfig
 #     AiocqhttpMessageEvent,
 # )
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from lxml import etree
 
 from .data_handler import DataHandler
@@ -29,7 +29,7 @@ from .rss import RSSItem
     'astrbot_plugin_rss',
     'megumiss',
     'RSS订阅插件',
-    '1.1.6',
+    '1.1.7',
     'https://github.com/megumiss/astrbot_plugin_rss',
 )
 class RssPlugin(Star):
@@ -39,7 +39,8 @@ class RssPlugin(Star):
         self.logger = logging.getLogger('astrbot')
         self.context = context
         self.config = config
-        self.data_handler = DataHandler()
+        data_config_path = os.path.join(StarTools.get_data_dir('astrbot_plugin_rss'), 'astrbot_plugin_rss_data.json')
+        self.data_handler = DataHandler(config_path=data_config_path)
 
         # 提取scheme文件中的配置
         self.title_max_length = config.get('title_max_length')

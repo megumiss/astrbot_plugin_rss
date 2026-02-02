@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List
 
-import astrbot.api.message_components as Comp
-
 
 @dataclass
 class RSSItem:
